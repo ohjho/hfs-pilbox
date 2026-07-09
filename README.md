@@ -1,5 +1,5 @@
 ---
-title: Name for you Space App
+title: pilbox
 emoji: 📚
 colorFrom: blue
 colorTo: yellow
@@ -7,10 +7,15 @@ sdk: gradio
 sdk_version: 5.32.0
 app_file: app.py
 pinned: false
-short_description: short description for your Space App
+short_description: pillow bounding box visualization tool
 ---
 
-# The HuggingFace Space Template
+# PILBox
+ultra-lite Bounding Box visualization using only numpy and Pillow
+
+with support for all bounding box format listed [here](https://albumentations.ai/docs/3-basic-usage/bounding-boxes-augmentations/#bounding-box-formats)
+
+## The HuggingFace Space Template
 setup with [github action to update automatically update your space](https://huggingface.co/docs/hub/spaces-github-actions)
 and manage dependencies with `uv`
 
