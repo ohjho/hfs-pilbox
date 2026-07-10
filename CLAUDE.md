@@ -4,9 +4,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A HuggingFace Space template (`sdk: gradio`) that runs on ZeroGPU. `app.py` is a Gradio
-app comparing "small" vision-language models (Qwen2.5-VL, InternVL3) on video captioning.
-`boxer.py` and `pilbox.py` are standalone bounding-box / image utility modules.
+A HuggingFace Space (`sdk: gradio`). `app.py` is a Gradio app that draws pascal_voc
+bounding boxes on an image (the web-UI counterpart of `annotate_cli.py`), built on the
+`pilbox.py` annotation module. `boxer.py` is a standalone bounding-box utility module.
+No models, no GPU — deps are just gradio + numpy + Pillow + loguru + typer.
 
 ## Environment & commands
 
@@ -35,16 +36,15 @@ Space metadata (title, emoji, sdk_version) lives in the YAML front-matter of `RE
 
 ## app.py architecture
 
-- **Model loading happens at import time.** `MODEL_ZOO` and `PROCESSORS` dicts are built
-  eagerly at module top-level, loading every model in the zoo before the app starts. Adding
-  a model means adding matching entries to both dicts.
-- `load_model` branches on `model_family` (derived from the model name) in a `match`
-  statement; only `InternVL3` is wired up, others raise `ValueError`. `video_inference`
-  has a second `match` for building inputs — both must be extended for a new family.
-- `@spaces.GPU(duration=120)` on `video_inference` is the ZeroGPU decorator; GPU is only
-  allocated during that call. `DEVICE = "auto"` and `DTYPE` (bf16/fp16) are resolved at import.
-- Flash Attention is pip-installed at runtime via a `subprocess.run` at the top of the file
-  (ZeroGPU quirk), but the zoo currently loads models with `use_flash_attention=False`.
+- A single `gr.Interface` whose callback `annotate_image(...)` delegates to
+  `pilbox.annotate` — no drawing logic lives in `app.py`. Inputs mirror the CLI options:
+  image, pascal_voc JSON (paste-in `gr.Code`), `label_key`, `color_key`, `width`,
+  `font_size`; output is the annotated image.
+- The demo example (image + JSON) is loaded from `assets/` at import via `_load_example()`,
+  guarded so a missing asset doesn't crash startup.
+- Bad JSON is surfaced to the user as a `gr.Error`.
+- Launched under `if __name__ == "__main__"` with `mcp_server=True` and `docs_url="/docs"`
+  (MCP server + FastAPI Swagger docs); the annotate endpoint is exposed as `api_name="annotate"`.
 
 ## Bounding-box conventions (boxer.py)
 
