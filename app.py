@@ -16,15 +16,26 @@ ASSETS = Path(__file__).parent / "assets"
 
 
 def _load_example():
-    """Return ``(image_path, boxes_json_text)`` for the demo example, if present."""
+    """Return ``(image_path, boxes_json_text)`` for the demo example.
+
+    The example assets (``example_0_in.jpg`` + ``example_0.json``) live in
+    ``assets/`` but are git-ignored and not deployed to the Space, so both are
+    optional. When either is missing the app runs without a preloaded example.
+
+    Returns:
+        ``(image_path, boxes_json_text)`` when both assets are present, else
+        ``(None, "[]")``.
+    """
+    image_path = ASSETS / "example_0_in.jpg"
+    boxes_path = ASSETS / "example_0.json"
+    if not (image_path.exists() and boxes_path.exists()):
+        logger.info("demo example assets not found in {}; running without one", ASSETS)
+        return None, "[]"
     try:
-        image_path = ASSETS / "example_0_in.jpg"
-        boxes_text = (ASSETS / "example_0.json").read_text()
-        if image_path.exists():
-            return str(image_path), boxes_text
+        return str(image_path), boxes_path.read_text()
     except OSError as e:
-        logger.warning(f"could not load example assets: {e}")
-    return None, "[]"
+        logger.warning(f"could not read example assets: {e}")
+        return None, "[]"
 
 
 EXAMPLE_IMAGE, EXAMPLE_JSON = _load_example()
