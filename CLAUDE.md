@@ -25,10 +25,13 @@ There is no test suite, linter config, or build step in this repo.
 ## Deployment (important)
 
 Pushing to `main` triggers `.github/workflows/deploy_to_hf_space.yaml`, which:
-1. Runs `uv export --no-hashes --format requirements-txt > requirements.txt` (HF Spaces
-   reads `requirements.txt`, not `pyproject.toml` — this is generated on the fly, never committed).
-2. **Force-pushes** the repo to the HuggingFace Space. Because of the generated
-   `requirements.txt`, the template assumes you are the sole contributor to the Space.
+1. Generates `requirements.txt` via `uv export --no-hashes --format requirements-txt`
+   **only if one doesn't already exist** (HF Spaces reads `requirements.txt`, not
+   `pyproject.toml`). When generated, it is committed (`chore: update requirements.txt`)
+   so the push actually carries it; a hand-maintained `requirements.txt` is left untouched.
+2. Pushes the repo to the HuggingFace Space. The push is a **force-push only when the
+   `FORCE_PUSH` GitHub secret is set** (otherwise a plain `git push`). The template assumes
+   you are the sole contributor to the Space.
 
 Before this workflow does anything real you must set the `HF_TOKEN` GitHub secret and
 replace the `HF_USERNAME`/`SPACE_NAME` placeholders on the last line of the workflow. The
