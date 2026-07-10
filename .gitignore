@@ -9,3 +9,12 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Image/binary assets are kept on disk but not committed (HF Spaces rejects
+# raw binaries; they must go through LFS/Xet). Demo example won't render on the
+# Space as a result. See CLAUDE.md "Deployment".
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.webp
