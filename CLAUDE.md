@@ -37,6 +37,13 @@ Before this workflow does anything real you must set the `HF_TOKEN` GitHub secre
 replace the `HF_USERNAME`/`SPACE_NAME` placeholders on the last line of the workflow. The
 Space metadata (title, emoji, sdk_version) lives in the YAML front-matter of `README.md`.
 
+**Binary assets are not committed.** HF Spaces rejects raw binaries in git (they must go
+through LFS/Xet), so image assets (`*.jpg`, `*.png`, …) are `.gitignore`d — kept on disk
+for local use but never pushed. Consequence: the demo example input image
+(`assets/example_0_in.jpg`) isn't on the Space, so `app.py`'s example won't render there
+(`_load_example()` is guarded, so this degrades gracefully). To ship an example image on
+the Space, switch to Git LFS instead of ignoring it.
+
 ## app.py architecture
 
 - A single `gr.Interface` whose callback `annotate_image(...)` delegates to
