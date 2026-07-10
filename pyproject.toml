@@ -9,5 +9,6 @@ dependencies = [
     "transformers==4.44.0",
     "pydantic==2.10.6",
     "loguru>=0.7.3",
-    "qwen-vl-utils>=0.0.11"
+    "qwen-vl-utils>=0.0.11",
+    "typer>=0.16.0",
 ]

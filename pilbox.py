@@ -1,8 +1,31 @@
+"""PILBox: ultra-lite bounding-box annotation using only numpy + Pillow.
+
+Bounding boxes use the **pascal_voc** convention: absolute pixel coordinates
+``(x0, y0, x1, y1)`` for the top-left and bottom-right corners, matching the
+``boundingBox`` dict found in ``assets/example_0.json``.
+
+The only third-party dependencies are ``numpy``, ``Pillow`` and ``loguru``.
+"""
+
+import os
+import json
+import colorsys
+
+import numpy as np
+from PIL import Image, ImageDraw, ImageFont
+from loguru import logger
+
+
+# --------------------------------------------------------------------------- #
+# Image helpers (kept for future features)
+# --------------------------------------------------------------------------- #
 def im_crop(im_rgb_array, x0, y0, x1, y1):
+    """Crop an RGB numpy image to the pascal_voc box ``(x0, y0, x1, y1)``."""
     return im_rgb_array[y0:y1, x0:x1, :]
 
 
 def im_center_crop(im_rgb_array, w, h):
+    """Center-crop an RGB numpy image to width ``w`` and height ``h``."""
     h_, w_, _ = im_rgb_array.shape
     assert (
         w_ >= w and h_ >= h
@@ -17,16 +40,17 @@ def im_center_crop(im_rgb_array, w, h):
 def load_pil_font(
     preferred_font_name: str = "arial.ttf", size: int = 12, fallback_to_any: bool = True
 ):
-    """
-    Attempts to load a font, with fallbacks.
+    """Attempt to load a TrueType font, with fallbacks.
+
     Args:
-        font_name (str): The name or relative path of the font file (e.g., 'arial.ttf').
-        size (int): The font size.
-        fallback_to_default (bool): If True, falls back to Pillow's default font.
+        preferred_font_name: The name or relative path of the font file
+            (e.g. ``'arial.ttf'``).
+        size: The font size in points.
+        fallback_to_any: If True, tries a list of common fonts before falling
+            back to Pillow's default font.
+
     Returns:
-        PIL.ImageFont.FreeTypeFont: The loaded font object.
-    Raises:
-        OSError: If no font can be loaded and fallback is not enabled.
+        PIL.ImageFont.FreeTypeFont | PIL.ImageFont.ImageFont: The loaded font.
     """
     any_fonts = ["DejaVuSans.ttf", "LiberationSans-Regular.ttf", "Arial Unicode.ttf"]
     # 1. Try absolute path relative to script
@@ -74,11 +98,72 @@ def load_pil_font(
                     continue  # Try next path
 
     logger.warning("load_pil_font: Falling back to Pillow's default font.")
-    return (
-        ImageFont.load_default()
-    )  # [9](https://www.geeksforgeeks.org/python/python-pil-imagefont-load_default/)
+    return ImageFont.load_default(size=size)
 
 
+# --------------------------------------------------------------------------- #
+# Color palette (unbounded, generated — no matplotlib)
+# --------------------------------------------------------------------------- #
+# Golden-angle in the unit hue circle; stepping by it spreads hues as far apart
+# as possible for any count, so consecutive indices never collide visually.
+_GOLDEN_RATIO_CONJUGATE = 0.6180339887498949
+
+
+def palette_color(index: int, saturation: float = 0.65, value: float = 0.95) -> str:
+    """Return the ``index``-th visually distinct color as a ``#rrggbb`` string.
+
+    Hues are spaced by the golden angle so any number of colors stay far apart,
+    meaning the palette never runs out (no fixed list, no matplotlib).
+
+    Note:
+        If you prefer fixed *named* colors instead, ``PIL.ImageColor.colormap``
+        exposes ~148 built-in CSS/X11 color names (e.g. ``"lime"``, ``"cyan"``).
+
+    Args:
+        index: Zero-based color index.
+        saturation: HSV saturation in ``[0, 1]``.
+        value: HSV value/brightness in ``[0, 1]``.
+
+    Returns:
+        Hex color string usable directly by Pillow, e.g. ``"#f23a1b"``.
+
+    >>> palette_color(0)
+    '#f25454'
+    >>> palette_color(0) != palette_color(1)
+    True
+    """
+    hue = (index * _GOLDEN_RATIO_CONJUGATE) % 1.0
+    r, g, b = colorsys.hsv_to_rgb(hue, saturation, value)
+    return "#{:02x}{:02x}{:02x}".format(int(r * 255), int(g * 255), int(b * 255))
+
+
+def color_for(key, mapping: dict) -> str:
+    """Return a stable palette color for ``key``, assigning a new one if unseen.
+
+    ``mapping`` is mutated in place to remember which palette index each distinct
+    key was given (first-seen order), so repeated calls are deterministic.
+
+    Args:
+        key: Any hashable value to color by (e.g. an object id or class name).
+        mapping: Dict tracking ``key -> palette index`` across calls.
+
+    Returns:
+        A ``#rrggbb`` color string.
+
+    >>> m = {}
+    >>> color_for("a", m) == color_for("a", m)  # stable
+    True
+    >>> color_for("a", m) != color_for("b", m)  # distinct
+    True
+    """
+    if key not in mapping:
+        mapping[key] = len(mapping)
+    return palette_color(mapping[key])
+
+
+# --------------------------------------------------------------------------- #
+# Drawing
+# --------------------------------------------------------------------------- #
 def im_draw_bbox(
     pil_im,
     x0,
@@ -88,28 +173,54 @@ def im_draw_bbox(
     color="black",
     width=3,
     caption=None,
-    caption_font=ImageFont.load_default(),
+    caption_font=None,
+    text_color="black",
 ):
-    """
-    draw bounding box on the input image pil_im in-place
-    Args:
-            color: color name as read by Pillow.ImageColor
-    """
+    """Draw a bounding box (and optional label tab) on ``pil_im`` in place.
 
-    if any([type(i) == float for i in [x0, y0, x1, y1]]):
-        warnings.warn(
-            f"im_draw_bbox: at least one of x0,y0,x1,y1 is of the type float and is converted to int."
-        )
-        x0 = int(x0)
-        y0 = int(y0)
-        x1 = int(x1)
-        y1 = int(y1)
+    The caption is rendered as a filled tab in ``color`` sitting just above the
+    box's top-left corner, with the text drawn in ``text_color`` — matching the
+    look of ``assets/example_0_out.jpg``.
+
+    Args:
+        pil_im: Target ``PIL.Image.Image`` (drawn on in place).
+        x0, y0, x1, y1: pascal_voc box coordinates (floats are coerced to int).
+        color: Box outline / label-tab color, as read by ``PIL.ImageColor``.
+        width: Outline width in pixels.
+        caption: Optional label text. If falsy, no label is drawn.
+        caption_font: Optional ``PIL.ImageFont``; defaults to Pillow's default.
+        text_color: Color of the caption text drawn on the tab.
+    """
+    if any(isinstance(i, float) for i in [x0, y0, x1, y1]):
+        x0, y0, x1, y1 = int(x0), int(y0), int(x1), int(y1)
+
+    if caption_font is None:
+        caption_font = ImageFont.load_default()
 
     draw = ImageDraw.Draw(pil_im)
     draw.rectangle([(x0, y0), (x1, y1)], outline=color, width=width)
+
     if caption:
-        draw.text((x0, y0), text=caption, fill=color, font=caption_font)
-    # return None
+        caption = str(caption)
+        # Measure the text so the tab hugs it.
+        left, top, right, bottom = draw.textbbox((0, 0), caption, font=caption_font)
+        tw, th = right - left, bottom - top
+        pad = 2
+        tab_h = th + 2 * pad
+        # Sit the tab above the box; if there's no room, place it inside.
+        tab_top = y0 - tab_h
+        if tab_top < 0:
+            tab_top = y0
+        draw.rectangle(
+            [(x0, tab_top), (x0 + tw + 2 * pad, tab_top + tab_h)],
+            fill=color,
+        )
+        draw.text(
+            (x0 + pad - left, tab_top + pad - top),
+            text=caption,
+            fill=text_color,
+            font=caption_font,
+        )
 
 
 def im_draw_point(
@@ -121,6 +232,7 @@ def im_draw_point(
     width: int = 2,
     color: str = "red",
 ) -> Image.Image:
+    """Return a copy of ``pil_im`` with a cross marker drawn at ``(x, y)``."""
     # Initialize variable for drawing image
     im_draw = pil_im.copy()
     draw = ImageDraw.Draw(im_draw)
@@ -140,8 +252,103 @@ def im_draw_point(
             xy=(draw_x + size + size / 2, draw_y - size / 2),
             text=caption,
             fill=color,
-            # stroke_width=width,
             font_size=width * 5,
         )
 
     return im_draw
+
+
+def annotate(
+    image: Image.Image,
+    objects,
+    *,
+    label_key: str = "object_id",
+    color_key: str = "object_id",
+    bbox_key: str = "boundingBox",
+    width: int = 3,
+    font=None,
+) -> Image.Image:
+    """Draw every object's pascal_voc bounding box on a copy of ``image``.
+
+    Args:
+        image: Source ``PIL.Image.Image`` (never mutated; a copy is returned).
+        objects: Iterable of dicts. Each must hold a pascal_voc box under
+            ``bbox_key`` as ``{"x0", "y0", "x1", "y1"}`` and, optionally, values
+            under ``label_key`` and ``color_key``.
+        label_key: Object key whose value is drawn as the box label.
+        color_key: Object key whose value groups boxes into colors (each distinct
+            value gets its own palette color).
+        bbox_key: Object key holding the pascal_voc box dict.
+        width: Box outline width in pixels.
+        font: Optional ``PIL.ImageFont`` for labels; defaults to Pillow's default.
+
+    Returns:
+        A new annotated ``PIL.Image.Image``.
+
+    >>> im = Image.new("RGB", (100, 100), "white")
+    >>> objs = [{"object_id": 0, "boundingBox": {"x0": 10, "y0": 10, "x1": 40, "y1": 60}}]
+    >>> out = annotate(im, objs)
+    >>> out.size
+    (100, 100)
+    >>> out is im
+    False
+    """
+    out = image.copy()
+    color_map: dict = {}
+    for obj in objects:
+        box = obj[bbox_key]
+        color = color_for(obj.get(color_key), color_map)
+        caption = obj.get(label_key)
+        im_draw_bbox(
+            out,
+            x0=box["x0"],
+            y0=box["y0"],
+            x1=box["x1"],
+            y1=box["y1"],
+            color=color,
+            width=width,
+            caption=None if caption is None else str(caption),
+            caption_font=font,
+        )
+    return out
+
+
+def annotate_file(
+    image_path: str,
+    annotations_path: str,
+    output_path: str,
+    *,
+    label_key: str = "object_id",
+    color_key: str = "object_id",
+    width: int = 3,
+    font_size: int = 20,
+) -> str:
+    """Annotate ``image_path`` using boxes from a JSON file and save the result.
+
+    Args:
+        image_path: Path to the source image.
+        annotations_path: Path to a JSON file holding a list of object dicts
+            (see :func:`annotate`).
+        output_path: Where to write the annotated image.
+        label_key: Object key drawn as each box's label.
+        color_key: Object key used to group boxes into colors.
+        width: Box outline width in pixels.
+        font_size: Label font size in points.
+
+    Returns:
+        ``output_path``.
+    """
+    with open(annotations_path) as f:
+        objects = json.load(f)
+    image = Image.open(image_path).convert("RGB")
+    font = load_pil_font(size=font_size)
+    out = annotate(
+        image,
+        objects,
+        label_key=label_key,
+        color_key=color_key,
+        width=width,
+        font=font,
+    )
+    out.save(output_path)
+    return output_path
