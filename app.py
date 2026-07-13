@@ -42,19 +42,23 @@ EXAMPLE_IMAGE, EXAMPLE_JSON = _load_example()
 
 
 def annotate_image(image, boxes_json, label_key, color_key, width, font_size):
-    """Draw the bounding boxes described by ``boxes_json`` onto ``image``.
+    """Draw pascal_voc bounding boxes onto an image and return the annotated image.
+
+    boxes_json is a JSON list of object dicts. Each object holds its box under a "boundingBox"
+    key as {"x0", "y0", "x1", "y1"}: (x0, y0) is the top-left corner and (x1, y1) is the
+    bottom-right corner, in absolute pixels of the input image (the "pascal_voc" format,
+    documented at
+    https://albumentations.ai/docs/3-basic-usage/bounding-boxes-augmentations/#bounding-box-formats ).
+    NOT normalized to 0-1 and NOT [x, y, width, height]. Each object may also carry the label_key
+    and color_key fields. The output is the input image with every box drawn on it.
 
     Args:
-        image: Input ``PIL.Image.Image`` from the UI.
-        boxes_json: JSON text: a list of object dicts, each with a pascal_voc
-            ``boundingBox`` ``{x0, y0, x1, y1}``.
-        label_key: Object key drawn as each box's label.
-        color_key: Object key used to color-group boxes.
+        image: The RGB image to annotate.
+        boxes_json: JSON text — a list of object dicts, each with a "boundingBox" {x0, y0, x1, y1} and optional label/color fields.
+        label_key: Name of the object field whose value is drawn as each box's text label.
+        color_key: Name of the object field used to color-group boxes (each distinct value gets its own color).
         width: Box outline width in pixels.
         font_size: Label font size in points.
-
-    Returns:
-        The annotated ``PIL.Image.Image``.
     """
     if image is None:
         raise gr.Error("Please provide an input image.")
@@ -74,7 +78,33 @@ def annotate_image(image, boxes_json, label_key, color_key, width, font_size):
     )
 
 
-app = gr.Interface(
+def crop_image(image, x0, y0, x1, y1):
+    """Crop an image to the pascal_voc box and return only that region as a new image.
+
+    The crop box is given as absolute pixel coordinates in the "pascal_voc" format: (x0, y0) is
+    the top-left corner and (x1, y1) is the bottom-right corner, measured in pixels of the input
+    image (documented at
+    https://albumentations.ai/docs/3-basic-usage/bounding-boxes-augmentations/#bounding-box-formats ).
+    The box must be non-empty (x1 > x0 and y1 > y0) and lie fully within the image; otherwise an
+    error is returned. NOT normalized to 0-1 and NOT [x, y, width, height]. The output is the
+    cropped RGB image of size (x1 - x0) by (y1 - y0).
+
+    Args:
+        image: The RGB image to crop.
+        x0: Left edge of the crop box, in absolute pixels from the left.
+        y0: Top edge of the crop box, in absolute pixels from the top.
+        x1: Right edge of the crop box, in absolute pixels from the left; must be greater than x0.
+        y1: Bottom edge of the crop box, in absolute pixels from the top; must be greater than y0.
+    """
+    if image is None:
+        raise gr.Error("Please provide an input image.")
+    try:
+        return pilbox.crop(image, x0, y0, x1, y1)
+    except ValueError as e:
+        raise gr.Error(str(e))
+
+
+annotate_interface = gr.Interface(
     fn=annotate_image,
     inputs=[
         gr.Image(type="pil", label="Input Image"),
@@ -97,6 +127,30 @@ app = gr.Interface(
     title="PILBox — Bounding Box Annotator",
     description="Draw pascal_voc bounding boxes on an image using numpy + Pillow.",
     api_name="annotate",
+)
+
+crop_interface = gr.Interface(
+    fn=crop_image,
+    inputs=[
+        gr.Image(type="pil", label="Input Image"),
+        gr.Number(value=0, precision=0, label="x0 (left)"),
+        gr.Number(value=0, precision=0, label="y0 (top)"),
+        gr.Number(value=100, precision=0, label="x1 (right)"),
+        gr.Number(value=100, precision=0, label="y1 (bottom)"),
+    ],
+    outputs=gr.Image(type="pil", label="Cropped Image"),
+    examples=(
+        [[EXAMPLE_IMAGE, 0, 0, 100, 100]] if EXAMPLE_IMAGE else None
+    ),
+    title="PILBox — Image Cropper",
+    description="Crop an image to a pascal_voc box (x0, y0, x1, y1) using numpy + Pillow.",
+    api_name="crop",
+)
+
+app = gr.TabbedInterface(
+    [annotate_interface, crop_interface],
+    ["Annotate", "Crop"],
+    title="PILBox",
 )
 
 if __name__ == "__main__":

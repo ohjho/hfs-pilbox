@@ -24,6 +24,48 @@ def im_crop(im_rgb_array, x0, y0, x1, y1):
     return im_rgb_array[y0:y1, x0:x1, :]
 
 
+def crop(image: Image.Image, x0, y0, x1, y1) -> Image.Image:
+    """Return the pascal_voc region ``(x0, y0, x1, y1)`` of ``image`` as a new image.
+
+    A PIL-friendly wrapper around :func:`im_crop`: it validates the box, converts
+    to RGB, and returns a new ``PIL.Image.Image`` without mutating the input.
+
+    Args:
+        image: Source ``PIL.Image.Image`` (never mutated; a new image is returned).
+        x0, y0, x1, y1: pascal_voc box — top-left ``(x0, y0)`` and bottom-right
+            ``(x1, y1)`` corners in absolute pixels (floats are coerced to int).
+
+    Returns:
+        A new ``PIL.Image.Image`` containing only the cropped region.
+
+    Raises:
+        ValueError: If the box is empty/inverted (``x1 <= x0`` or ``y1 <= y0``) or
+            falls outside the image bounds.
+
+    >>> im = Image.new("RGB", (100, 100), "white")
+    >>> out = crop(im, 10, 20, 40, 80)
+    >>> out.size
+    (30, 60)
+    >>> out is im
+    False
+    """
+    x0, y0, x1, y1 = int(x0), int(y0), int(x1), int(y1)
+    w, h = image.size
+    if x1 <= x0 or y1 <= y0:
+        raise ValueError(
+            f"crop box is empty: need x1 > x0 and y1 > y0, got "
+            f"(x0={x0}, y0={y0}, x1={x1}, y1={y1})"
+        )
+    if x0 < 0 or y0 < 0 or x1 > w or y1 > h:
+        raise ValueError(
+            f"crop box ({x0}, {y0}, {x1}, {y1}) falls outside the "
+            f"image bounds ({w}x{h})"
+        )
+    arr = np.asarray(image.convert("RGB"))
+    cropped = im_crop(arr, x0=x0, y0=y0, x1=x1, y1=y1)
+    return Image.fromarray(cropped)
+
+
 def im_center_crop(im_rgb_array, w, h):
     """Center-crop an RGB numpy image to width ``w`` and height ``h``."""
     h_, w_, _ = im_rgb_array.shape

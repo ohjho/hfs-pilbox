@@ -47,15 +47,22 @@ commit the JSON.
 
 ## app.py architecture
 
-- A single `gr.Interface` whose callback `annotate_image(...)` delegates to
-  `pilbox.annotate` — no drawing logic lives in `app.py`. Inputs mirror the CLI options:
-  image, pascal_voc JSON (paste-in `gr.Code`), `label_key`, `color_key`, `width`,
-  `font_size`; output is the annotated image.
+- A `gr.TabbedInterface` combining two `gr.Interface`s — no image logic lives in `app.py`;
+  each callback delegates to `pilbox`.
+  - **Annotate** tab: `annotate_image(...)` → `pilbox.annotate` (`api_name="annotate"`).
+    Inputs mirror the CLI options: image, pascal_voc JSON (paste-in `gr.Code`), `label_key`,
+    `color_key`, `width`, `font_size`; output is the annotated image.
+  - **Crop** tab: `crop_image(...)` → `pilbox.crop` (`api_name="crop"`). Inputs are an image
+    plus manual `gr.Number` fields `x0/y0/x1/y1` (pascal_voc box); output is the cropped
+    region.
 - The demo example (image + JSON) is loaded from `assets/` at import via `_load_example()`,
   guarded so a missing asset doesn't crash startup.
-- Bad JSON is surfaced to the user as a `gr.Error`.
+- Bad JSON (annotate) and invalid crop boxes are surfaced to the user as a `gr.Error`
+  (`pilbox.crop` raises `ValueError`, re-raised as `gr.Error`).
 - Launched under `if __name__ == "__main__"` with `mcp_server=True` and `docs_url="/docs"`
-  (MCP server + FastAPI Swagger docs); the annotate endpoint is exposed as `api_name="annotate"`.
+  (MCP server + FastAPI Swagger docs); each tab's endpoint (`annotate`, `crop`) is exposed as
+  its own MCP tool. MCP tool name = the Python function name (`annotate_image` / `crop_image`),
+  not `api_name`.
 
 ## Bounding-box conventions (boxer.py)
 
@@ -81,6 +88,10 @@ dict `{x0, y0, x1, y1}` of absolute top-left / bottom-right pixels (matching the
   per unique key. (`PIL.ImageColor.colormap` is the named-color alternative.)
 - `annotate_file(image_path, annotations_path, output_path, ...)` wraps load → annotate →
   save for the CLI.
+- `crop(image, x0, y0, x1, y1) -> Image.Image` is a PIL-in/PIL-out wrapper around `im_crop`:
+  it validates the pascal_voc box (raises `ValueError` if empty/inverted or out of bounds),
+  converts to RGB, and returns a new image (never mutates the input). Used by `app.py`'s Crop
+  tab.
 - `im_crop`, `im_center_crop`, `im_draw_point`, `load_pil_font` are retained helpers.
 
 CLI: `annotate_cli.py` (typer + loguru, run separately so `import pilbox` stays lite):
