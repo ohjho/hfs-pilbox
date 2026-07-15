@@ -47,7 +47,7 @@ commit the JSON.
 
 ## app.py architecture
 
-- A `gr.TabbedInterface` combining two `gr.Interface`s — no image logic lives in `app.py`;
+- A `gr.TabbedInterface` combining three `gr.Interface`s — no image logic lives in `app.py`;
   each callback delegates to `pilbox`.
   - **Annotate** tab: `annotate_image(...)` → `pilbox.annotate` (`api_name="annotate"`).
     Inputs mirror the CLI options: image, pascal_voc JSON (paste-in `gr.Code`), `label_key`,
@@ -58,14 +58,21 @@ commit the JSON.
   - **Crop** tab: `crop_image(...)` → `pilbox.crop` (`api_name="crop"`). Inputs are an image
     plus manual `gr.Number` fields `x0/y0/x1/y1` (pascal_voc box); output is the cropped
     region.
+  - **Mask** tab: `mask_image(...)` → `pilbox.apply_mask` (`api_name="mask"`). Inputs are an
+    image, a base64-encoded PNG mask (paste-in `gr.Textbox`, same size as the image), and a
+    `gr.ColorPicker` background color (default black `#000000`); output is the foreground cut
+    out over that solid background. The color picker is a `string` in the API/MCP schema
+    (a CSS color); `_rgb_from_css` converts `#rrggbb`/`rgba(...)` to an RGB tuple.
 - The demo example (image + JSON) is loaded from `assets/` at import via `_load_example()`,
-  guarded so a missing asset doesn't crash startup.
-- Bad JSON (annotate) and invalid crop boxes are surfaced to the user as a `gr.Error`
-  (`pilbox.crop` raises `ValueError`, re-raised as `gr.Error`).
+  guarded so a missing asset doesn't crash startup; `_example_mask()` pulls the first object's
+  `b64_mask` out of that JSON to preload the Mask tab (empty when assets are absent).
+- Bad JSON (annotate), invalid crop boxes, and undecodable/mismatched masks are surfaced to the
+  user as a `gr.Error` (`pilbox.crop` / `pilbox.apply_mask` raise `ValueError`, re-raised as
+  `gr.Error`).
 - Launched under `if __name__ == "__main__"` with `mcp_server=True` and `docs_url="/docs"`
-  (MCP server + FastAPI Swagger docs); each tab's endpoint (`annotate`, `crop`) is exposed as
-  its own MCP tool. MCP tool name = the Python function name (`annotate_image` / `crop_image`),
-  not `api_name`.
+  (MCP server + FastAPI Swagger docs); each tab's endpoint (`annotate`, `crop`, `mask`) is
+  exposed as its own MCP tool. MCP tool name = the Python function name (`annotate_image` /
+  `crop_image` / `mask_image`), not `api_name`.
 
 ## Bounding-box conventions (boxer.py)
 
@@ -94,6 +101,16 @@ dict `{x0, y0, x1, y1}` of absolute top-left / bottom-right pixels (matching the
 - `im_color_mask(im_rgb_array, mask_array, rgb_tup=..., alpha=0.5, get_pil_im=False)` blends
   a solid color into the image wherever the boolean mask is set; `_mask_from_b64` decodes a
   base64-PNG mask to a boolean array. Both back `annotate`'s mask overlay.
+- `im_apply_mask(im_rgb_array, mask_array, *, bg_rgb_tup=None, bg_blur_radius=None,
+  bg_greyscale=False, mask_gblur_radius=0, get_pil_im=False)` keeps the masked **foreground**
+  and transforms the **background**: solid `bg_rgb_tup` color, `bg_blur_radius` Gaussian blur,
+  or `bg_greyscale` — checked in that order; with none set the background is made transparent
+  (RGBA). `mask_gblur_radius` softens the cutout edge. (The blur/greyscale paths need
+  `ImageFilter`/`ImageOps`, both imported at the top of `pilbox.py`.)
+- `apply_mask(image, b64_mask, bg_rgb_tup=(0,0,0)) -> Image.Image` is the PIL-in/PIL-out
+  wrapper around `im_apply_mask` used by `app.py`'s Mask tab: decodes the base64 PNG mask
+  (raising `ValueError` on bad base64 or a size mismatch) and returns a new RGB image with the
+  background filled by `bg_rgb_tup`.
 - `annotate_file(image_path, annotations_path, output_path, ...)` wraps load → annotate →
   save for the CLI.
 - `crop(image, x0, y0, x1, y1) -> Image.Image` is a PIL-in/PIL-out wrapper around `im_crop`:

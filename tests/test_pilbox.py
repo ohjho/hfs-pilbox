@@ -162,3 +162,53 @@ def test_annotate_empty_mask_key_skips_masks():
     # the far corner stays white.
     out = pilbox.annotate(im, objs, mask_key="", mask_alpha=1.0)
     assert tuple(int(v) for v in np.array(out)[38, 38]) == (255, 255, 255)
+
+
+def _fg_bg_image_and_mask():
+    """A 4x4 solid image plus a center 2x2 foreground mask."""
+    img = np.zeros((4, 4, 3), dtype=np.uint8)
+    img[:, :] = (200, 100, 50)
+    mask = np.zeros((4, 4), dtype=bool)
+    mask[1:3, 1:3] = True
+    return img, mask
+
+
+def test_im_apply_mask_color_background_keeps_foreground():
+    img, mask = _fg_bg_image_and_mask()
+    out = pilbox.im_apply_mask(img, mask, bg_rgb_tup=(0, 0, 0))
+    assert out.shape == (4, 4, 3)
+    assert tuple(int(v) for v in out[1, 1]) == (200, 100, 50)  # foreground kept
+    assert tuple(int(v) for v in out[0, 0]) == (0, 0, 0)  # background blacked out
+
+
+def test_im_apply_mask_rejects_shape_mismatch():
+    img, mask = _fg_bg_image_and_mask()
+    with pytest.raises(ValueError):
+        pilbox.im_apply_mask(img, mask[:, :2], bg_rgb_tup=(0, 0, 0))
+
+
+def test_im_apply_mask_bg_options_do_not_raise():
+    # regression guard: these paths use ImageFilter / ImageOps, which must be imported.
+    img, mask = _fg_bg_image_and_mask()
+    assert pilbox.im_apply_mask(img, mask, bg_blur_radius=2).shape == (4, 4, 3)
+    assert pilbox.im_apply_mask(img, mask, bg_greyscale=True).shape == (4, 4, 3)
+    assert pilbox.im_apply_mask(
+        img, mask, bg_rgb_tup=(0, 0, 0), mask_gblur_radius=2
+    ).shape == (4, 4, 3)
+    # no bg_* option -> transparent (RGBA) result
+    assert pilbox.im_apply_mask(img, mask).shape == (4, 4, 4)
+
+
+def test_apply_mask_wrapper_masks_background():
+    im = Image.new("RGB", (4, 4), (200, 100, 50))
+    _, mask = _fg_bg_image_and_mask()
+    out = pilbox.apply_mask(im, _b64_mask(mask), bg_rgb_tup=(0, 0, 0))
+    assert isinstance(out, Image.Image) and out.mode == "RGB"
+    assert out.getpixel((1, 1)) == (200, 100, 50)  # foreground kept
+    assert out.getpixel((0, 0)) == (0, 0, 0)  # background blacked out
+
+
+def test_apply_mask_rejects_bad_base64():
+    im = Image.new("RGB", (4, 4), "white")
+    with pytest.raises(ValueError):
+        pilbox.apply_mask(im, "not-valid-base64-png!!", bg_rgb_tup=(0, 0, 0))

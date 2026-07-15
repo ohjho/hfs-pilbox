@@ -14,7 +14,7 @@ import base64
 import colorsys
 
 import numpy as np
-from PIL import Image, ImageColor, ImageDraw, ImageFont
+from PIL import Image, ImageColor, ImageDraw, ImageFilter, ImageFont, ImageOps
 from loguru import logger
 
 
@@ -352,11 +352,150 @@ def im_color_mask(
     return im if get_pil_im else np.array(im)
 
 
+def im_apply_mask(
+    im_rgb_array,
+    mask_array,
+    get_pil_im=False,
+    bg_rgb_tup=None,
+    bg_blur_radius=None,
+    bg_greyscale=False,
+    mask_gblur_radius=0,
+):
+    """Keep the masked foreground and replace/transform the background.
+
+    Pixels where ``mask_array`` is truthy keep their original value; the rest (the
+    background) are handled per the mutually-exclusive ``bg_*`` options below —
+    checked in order ``bg_rgb_tup`` → ``bg_blur_radius`` → ``bg_greyscale``, and if
+    none is set the background is made transparent (an RGBA result).
+
+    Args:
+        im_rgb_array: RGB image as a ``(H, W, 3)`` ``uint8`` numpy array.
+        mask_array: Foreground mask, shape ``(H, W)`` matching the image
+            (bool or 0/255); truthy = keep the original pixel.
+        get_pil_im: If True return a ``PIL.Image.Image``; otherwise a numpy array.
+        bg_rgb_tup: If given, fill the background with this ``(r, g, b)`` color
+            (3-channel result).
+        bg_blur_radius: If given (and no ``bg_rgb_tup``), Gaussian-blur the
+            background by this radius (3-channel result).
+        bg_greyscale: If True (and neither above), greyscale the background
+            (3-channel result).
+        mask_gblur_radius: If ``> 0``, Gaussian-blur the mask edge by this radius
+            for a soft cutout.
+
+    Returns:
+        The composited image — a ``PIL.Image.Image`` when ``get_pil_im`` else a
+        numpy array. Shape is ``(H, W, 3)`` for any ``bg_*`` option, or
+        ``(H, W, 4)`` (RGBA, transparent background) when none is set.
+
+    Raises:
+        ValueError: If the image and mask height/width do not match.
+
+    Refs: https://note.nkmk.me/en/python-pillow-paste/
+
+    >>> import numpy as np
+    >>> img = np.zeros((2, 2, 3), dtype=np.uint8)
+    >>> img[:, :] = (200, 100, 50)
+    >>> mask = np.array([[True, False], [False, False]])
+    >>> out = im_apply_mask(img, mask, bg_rgb_tup=(0, 0, 0))
+    >>> out.shape
+    (2, 2, 3)
+    >>> tuple(int(v) for v in out[0, 0])  # foreground kept
+    (200, 100, 50)
+    >>> tuple(int(v) for v in out[1, 1])  # background -> black
+    (0, 0, 0)
+    """
+    h, w, c = im_rgb_array.shape
+    m_h, m_w = mask_array.shape
+
+    if not all([h == m_h, w == m_w]):
+        raise ValueError(
+            f"im_apply_mask: mask_array size {(m_h, m_w)} must match im_rgb_array {(h, w)}"
+        )
+
+    im = Image.fromarray(im_rgb_array)
+
+    # convert bitwise mask from np to pillow
+    # ref: https://note.nkmk.me/en/python-pillow-paste/
+    pil_mask = Image.fromarray(np.uint8(255 * mask_array))
+    pil_mask = (
+        pil_mask.filter(ImageFilter.GaussianBlur(radius=mask_gblur_radius))
+        if mask_gblur_radius > 0
+        else pil_mask
+    )
+
+    if bg_rgb_tup:
+        bg_im = np.zeros([h, w, 3], dtype=np.uint8)  # black
+        bg_im[:, :] = bg_rgb_tup  # apply color
+
+        # old method using just np but doesn't support blurred mask
+        # idx = (mask_array != 0)
+        # bg_im[idx] = im_rgb_array[idx]
+
+        bg_im = Image.fromarray(bg_im)
+        bg_im.paste(im, mask=pil_mask)
+        im = bg_im
+    elif bg_blur_radius:
+        bg_im = im.copy().filter(ImageFilter.GaussianBlur(radius=bg_blur_radius))
+        bg_im.paste(im, mask=pil_mask)
+        im = bg_im
+    elif bg_greyscale:
+        bg_im = ImageOps.grayscale(Image.fromarray(im_rgb_array))
+        bg_im = np.array(bg_im)
+        bg_im = np.stack((bg_im,) * 3, axis=-1)  # greyscale 1-channel to 3-channel
+
+        bg_im = Image.fromarray(bg_im)
+        bg_im.paste(im, mask=pil_mask)
+        im = bg_im
+    else:
+        im.putalpha(pil_mask)
+
+    return im if get_pil_im else np.array(im)
+
+
 def _mask_from_b64(b64_str: str) -> np.ndarray:
     """Decode a base64-encoded PNG mask into a boolean ``(H, W)`` numpy array."""
     raw = base64.b64decode(b64_str)
     im = Image.open(io.BytesIO(raw))
     return np.asarray(im.convert("1"), dtype=bool)
+
+
+def apply_mask(image: Image.Image, b64_mask: str, bg_rgb_tup=(0, 0, 0)) -> Image.Image:
+    """Mask out ``image``'s background using a base64 PNG mask, on a new image.
+
+    A PIL-friendly wrapper around :func:`im_apply_mask`: it decodes the mask,
+    keeps the masked foreground, replaces the background with ``bg_rgb_tup``, and
+    returns a new RGB ``PIL.Image.Image`` without mutating the input.
+
+    Args:
+        image: Source ``PIL.Image.Image`` (never mutated; a new image is returned).
+        b64_mask: Base64-encoded PNG mask the same size as ``image``; non-zero
+            pixels mark the foreground to keep.
+        bg_rgb_tup: Background fill color as an ``(r, g, b)`` tuple (default black).
+
+    Returns:
+        A new ``PIL.Image.Image`` with the background filled by ``bg_rgb_tup``.
+
+    Raises:
+        ValueError: If ``b64_mask`` cannot be decoded, or the mask size does not
+            match the image.
+
+    >>> im = Image.new("RGB", (4, 4), (200, 100, 50))
+    >>> import base64, io
+    >>> import numpy as np
+    >>> m = np.zeros((4, 4), dtype=np.uint8); m[1:3, 1:3] = 255
+    >>> buf = io.BytesIO(); Image.fromarray(m).convert("1").save(buf, format="PNG")
+    >>> out = apply_mask(im, base64.b64encode(buf.getvalue()).decode())
+    >>> out.size
+    (4, 4)
+    >>> out.getpixel((1, 1)), out.getpixel((0, 0))
+    ((200, 100, 50), (0, 0, 0))
+    """
+    try:
+        mask = _mask_from_b64(b64_mask)
+    except Exception as e:
+        raise ValueError(f"could not decode base64 PNG mask: {e}")
+    arr = np.asarray(image.convert("RGB"))
+    return im_apply_mask(arr, mask, bg_rgb_tup=tuple(bg_rgb_tup), get_pil_im=True)
 
 
 def annotate(

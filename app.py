@@ -9,6 +9,7 @@ from pathlib import Path
 
 import gradio as gr
 from loguru import logger
+from PIL import ImageColor
 
 import pilbox
 
@@ -39,6 +40,25 @@ def _load_example():
 
 
 EXAMPLE_IMAGE, EXAMPLE_JSON = _load_example()
+
+
+def _example_mask():
+    """Return the first object's base64 PNG mask from the demo JSON, if any.
+
+    Used to preload the Mask tab's example. Returns an empty string when the
+    example assets are absent (e.g. on the Space) or carry no mask.
+    """
+    try:
+        objects = json.loads(EXAMPLE_JSON)
+        for obj in objects:
+            if obj.get("b64_mask"):
+                return obj["b64_mask"]
+    except (json.JSONDecodeError, AttributeError, TypeError):
+        pass
+    return ""
+
+
+EXAMPLE_MASK = _example_mask()
 
 
 def annotate_image(
@@ -113,6 +133,38 @@ def crop_image(image, x0, y0, x1, y1):
         raise gr.Error(str(e))
 
 
+def _rgb_from_css(color: str):
+    """Convert a CSS color string ("#rrggbb" or "rgba(r,g,b,a)") to an (r, g, b) tuple."""
+    color = (color or "#000000").strip()
+    if color.startswith("rgba") or color.startswith("rgb"):
+        nums = color[color.index("(") + 1 : color.index(")")].split(",")
+        return tuple(int(float(n)) for n in nums[:3])
+    return ImageColor.getrgb(color)
+
+
+def mask_image(image, b64_mask, bg_color):
+    """Cut out an image's foreground using a base64-encoded PNG mask and return it on a solid background.
+
+    The mask is a base64-encoded PNG string the SAME pixel size as the input image: pixels that are
+    non-zero (white) mark the foreground to keep, and zero (black) pixels are the background. The
+    output keeps the foreground pixels unchanged and replaces every background pixel with bg_color,
+    so the subject is "masked out" of its scene onto a flat backdrop. bg_color is a CSS hex color
+    string like "#000000" (the default, black); "#ff0000" would put the foreground on red.
+
+    Args:
+        image: The RGB image to mask.
+        b64_mask: Base64-encoded PNG mask, same width and height as image; non-zero pixels are the foreground to keep.
+        bg_color: Background fill as a CSS hex color string like "#rrggbb"; defaults to black "#000000".
+    """
+    if image is None:
+        raise gr.Error("Please provide an input image.")
+    try:
+        rgb = _rgb_from_css(bg_color)
+        return pilbox.apply_mask(image, b64_mask, bg_rgb_tup=rgb)
+    except ValueError as e:
+        raise gr.Error(str(e))
+
+
 annotate_interface = gr.Interface(
     fn=annotate_image,
     inputs=[
@@ -158,9 +210,27 @@ crop_interface = gr.Interface(
     api_name="crop",
 )
 
+mask_interface = gr.Interface(
+    fn=mask_image,
+    inputs=[
+        gr.Image(type="pil", label="Input Image"),
+        gr.Textbox(lines=4, label="Mask (base64-encoded PNG)", value=EXAMPLE_MASK),
+        gr.ColorPicker(value="#000000", label="Background color"),
+    ],
+    outputs=gr.Image(type="pil", label="Masked Image"),
+    examples=(
+        [[EXAMPLE_IMAGE, EXAMPLE_MASK, "#000000"]]
+        if EXAMPLE_IMAGE and EXAMPLE_MASK
+        else None
+    ),
+    title="PILBox — Background Masker",
+    description="Cut out an image's foreground with a base64 PNG mask, over a solid background color.",
+    api_name="mask",
+)
+
 app = gr.TabbedInterface(
-    [annotate_interface, crop_interface],
-    ["Annotate", "Crop"],
+    [annotate_interface, crop_interface, mask_interface],
+    ["Annotate", "Crop", "Mask"],
     title="PILBox",
 )
 
