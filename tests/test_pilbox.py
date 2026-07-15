@@ -67,6 +67,34 @@ def test_im_draw_bbox_coerces_float_coords():
     assert not np.array_equal(np.array(im), before)
 
 
+def test_annotate_shared_color_map_stable_across_calls():
+    # A shared color_map must give a key the SAME color regardless of the object
+    # order it appears in — the property that keeps a track id one color across
+    # video frames. object_id 1 appears first in call A and second in call B.
+    im = Image.new("RGB", (60, 60), "white")
+    shared = {}
+
+    a = [{"object_id": 1, "boundingBox": {"x0": 2, "y0": 2, "x1": 10, "y1": 10}}]
+    b = [
+        {"object_id": 0, "boundingBox": {"x0": 2, "y0": 2, "x1": 10, "y1": 10}},
+        {"object_id": 1, "boundingBox": {"x0": 20, "y0": 20, "x1": 30, "y1": 30}},
+    ]
+    pilbox.annotate(im, a, color_map=shared)
+    pilbox.annotate(im, b, color_map=shared)
+
+    # object_id 1 was seen first -> palette index 0 in BOTH calls; 0 -> index 1.
+    assert shared[1] == 0
+    assert shared[0] == 1
+
+
+def test_annotate_default_color_map_is_per_call():
+    # Without a shared map each call colors independently (backward compatible).
+    im = Image.new("RGB", (60, 60), "white")
+    objs = [{"object_id": 7, "boundingBox": {"x0": 2, "y0": 2, "x1": 10, "y1": 10}}]
+    out = pilbox.annotate(im, objs)  # no color_map arg
+    assert out.size == (60, 60)
+
+
 def test_annotate_custom_keys():
     im = Image.new("RGB", (100, 100), "white")
     objs = [{"cls": "player", "box": {"x0": 5, "y0": 5, "x1": 30, "y1": 30}}]

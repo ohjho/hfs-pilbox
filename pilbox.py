@@ -509,6 +509,7 @@ def annotate(
     mask_alpha: float = 0.5,
     width: int = 3,
     font=None,
+    color_map: dict = None,
 ) -> Image.Image:
     """Draw every object's pascal_voc box (and optional mask) on a copy of ``image``.
 
@@ -531,6 +532,11 @@ def annotate(
         mask_alpha: Mask overlay opacity in ``[0, 1]``.
         width: Box outline width in pixels.
         font: Optional ``PIL.ImageFont`` for labels; defaults to Pillow's default.
+        color_map: Optional ``color_key value -> palette index`` dict, mutated in
+            place. Pass a shared (optionally pre-seeded) map across many
+            ``annotate`` calls to keep a key's color stable — e.g. so a track id
+            keeps one color across every frame of a video. Defaults to a fresh
+            per-call map (each image colored independently).
 
     Returns:
         A new annotated ``PIL.Image.Image``.
@@ -544,7 +550,7 @@ def annotate(
     False
     """
     out = image.copy()
-    color_map: dict = {}
+    color_map = {} if color_map is None else color_map
     # Assign palette indices once, in object order, so an object's mask and box
     # resolve to the identical color regardless of which is drawn first.
     for obj in objects:

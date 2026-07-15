@@ -120,7 +120,7 @@ def get_video_metadata(video_path: str, bverbose: bool = True):
 @app.command()
 def extract_frames(
     input_path: str,
-    fps: int = 8,
+    fps: Optional[float] = 8,
     max_short_edge: int = 1080,
     write_timestamp: bool = True,
     write_frame_num: bool = True,
@@ -134,7 +134,10 @@ def extract_frames(
 
     Args:
         input_path (str): Path to the input video file.
-        fps (int): Frames per second to extract.
+        fps (float | None): Frames per second to extract; capped to the source
+            fps. Pass ``None`` to skip resampling and extract *every* native
+            frame (so output index i == source frame i — needed for
+            frame-accurate, per-frame annotation).
         max_short_edge (int): Maximum length of the shorter edge of the extracted frames.
         write_timestamp (bool): Whether to write the timestamp of each frame.
         write_frame_num (bool): Whether to write the frame number of each frame.
@@ -170,14 +173,15 @@ def extract_frames(
     long_edge += 0 if long_edge % 2 == 0 else 1
     duration = vmeta["duration"]
     org_fps = vmeta["fps"]
-    if fps > org_fps:
+    if fps is not None and fps > org_fps:
         logger.debug(
             f"requested fps({fps}) exceeded source fps({org_fps}): fps will be capped to source fps({org_fps})"
         )
         fps = org_fps
 
-    # Calculate total frames to extract based on fps and duration
-    total_frames = int(duration * fps)
+    # Calculate total frames to extract (only a progress-bar estimate). With
+    # fps=None every native frame is read, so estimate off the source fps.
+    total_frames = int(duration * (org_fps if fps is None else fps))
 
     # add scale filter only if needed
     add_scale_filter = max_short_edge < min(org_w, org_h)
@@ -194,30 +198,32 @@ def extract_frames(
         else r"text='Timestamp\:%{pts\:hms}'"
     )
 
-    # Setup the ffmpeg filter chain
-    drawtext_filter = (
-        f",drawtext={drawtext_filter_text}: x=(w-tw)/2: y={text_y_expr}: fontcolor=white: fontsize={text_font_size}: box=1: boxcolor=0x00000099: boxborderw=5"
-        if write_timestamp
-        else ""
-    )
-    scale_filter = (
-        # f",scale='if(lt(iw, ih), {max_short_edge}, -2)':'if(lt(ih, iw), {max_short_edge}, -2)'"
-        f",scale='{w}:{h}'"
-        if add_scale_filter
-        else ""
-    )
-    filter_chain = f"fps={fps}{drawtext_filter}{scale_filter}"
+    # Setup the ffmpeg filter chain (each entry is comma-joined). fps=None skips
+    # resampling entirely so every native frame is emitted.
+    filters = []
+    if fps is not None:
+        filters.append(f"fps={fps}")
+    if write_timestamp:
+        filters.append(
+            f"drawtext={drawtext_filter_text}: x=(w-tw)/2: y={text_y_expr}: fontcolor=white: fontsize={text_font_size}: box=1: boxcolor=0x00000099: boxborderw=5"
+        )
+    if add_scale_filter:
+        filters.append(f"scale='{w}:{h}'")
+    filter_chain = ",".join(filters)
 
     # Run ffmpeg process with output as rawvideo piped to stdout.
     # NOTE: stderr is intentionally left to inherit (not piped). If it were
     # piped without being drained, ffmpeg would block once the OS pipe buffer
     # fills, deadlocking against our stdout-only read loop on longer clips.
+    output_kwargs = {"format": "rawvideo", "pix_fmt": "rgb24"}
+    if filter_chain:  # omit an empty -vf (invalid); no filter = passthrough
+        output_kwargs["vf"] = filter_chain
     process = (
         ffmpeg.input(input_path)
-        .output("pipe:", vf=filter_chain, format="rawvideo", pix_fmt="rgb24")
+        .output("pipe:", **output_kwargs)
         .run_async(pipe_stdout=True)
     )
-    logger.info(f"running ffmpeg with filter:\n{filter_chain}")
+    logger.info(f"running ffmpeg with filter:\n{filter_chain or '(none)'}")
 
     frame_size = (
         long_edge * max_short_edge * 3 if add_scale_filter else org_w * org_h * 3
@@ -248,17 +254,15 @@ def extract_frames(
             im.save(output_path)
 
     if out_vid_path:
-        (
-            ffmpeg.input(input_path)
-            .output(
-                out_vid_path,
-                vf=filter_chain,
-                vcodec="libx264",
-                pix_fmt="yuv420p",
-                r=fps,
-                # add other options as needed
-            )
-            .run(overwrite_output=True)
+        vid_kwargs = {
+            "vcodec": "libx264",
+            "pix_fmt": "yuv420p",
+            "r": org_fps if fps is None else fps,
+        }
+        if filter_chain:
+            vid_kwargs["vf"] = filter_chain
+        ffmpeg.input(input_path).output(out_vid_path, **vid_kwargs).run(
+            overwrite_output=True
         )
         logger.success(f"Video created at {out_vid_path}")
 
@@ -388,6 +392,58 @@ def extract_specific_frames(
     )
 
     return frames
+
+
+def frames_to_video(
+    frames,
+    out_path: str,
+    fps: float,
+    *,
+    vcodec: str = "libx264",
+    pix_fmt: str = "yuv420p",
+):
+    """Encode a list of PIL frames into a (silent) video file via FFmpeg.
+
+    RGB frames are piped to ffmpeg's stdin as ``rawvideo`` and encoded. All
+    frames must share the size of ``frames[0]``. The inverse of
+    :func:`extract_frames` — used to write annotated frames back out.
+
+    Args:
+        frames: Non-empty list of same-size ``PIL.Image.Image`` (converted to RGB).
+        out_path (str): Destination video path (overwritten if it exists).
+        fps (float): Output frame rate.
+        vcodec (str): Video codec (default ``libx264``).
+        pix_fmt (str): Output pixel format (default ``yuv420p``).
+
+    Returns:
+        str: ``out_path``.
+
+    Raises:
+        ValueError: If ``frames`` is empty.
+    """
+    if not frames:
+        raise ValueError("frames_to_video: no frames to encode")
+    w, h = frames[0].size
+    # Only stdin is piped (we feed frames); stdout/stderr inherit, so there's no
+    # pipe-buffer deadlock. yuv420p needs even dimensions — scale down to even.
+    process = (
+        ffmpeg.input("pipe:", format="rawvideo", pix_fmt="rgb24", s=f"{w}x{h}", r=fps)
+        .output(
+            out_path,
+            vcodec=vcodec,
+            pix_fmt=pix_fmt,
+            r=fps,
+            vf="scale=trunc(iw/2)*2:trunc(ih/2)*2",
+        )
+        .overwrite_output()
+        .run_async(pipe_stdin=True)
+    )
+    for frame in tqdm(frames, desc=f"Encoding {out_path}"):
+        process.stdin.write(frame.convert("RGB").tobytes())
+    process.stdin.close()
+    process.wait()
+    logger.success(f"Video created at {out_path} ({len(frames)} frames @ {fps}fps)")
+    return out_path
 
 
 @app.command()

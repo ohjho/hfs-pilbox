@@ -4,13 +4,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A HuggingFace Space (`sdk: gradio`). `app.py` is a Gradio app that draws pascal_voc
-bounding boxes on an image (the web-UI counterpart of `annotate_cli.py`), built on the
-`pilbox.py` annotation module. `boxer.py` is a standalone bounding-box utility module.
-`ffmpret.py` is a standalone video-extraction CLI (frames / metadata / audio) built on
-`ffmpeg-python`; it is not yet wired into the Gradio app.
-No models, no GPU — deps are gradio + numpy + Pillow + loguru + typer, plus ffmpeg-python +
-tqdm for `ffmpret.py` (which also needs a system `ffmpeg` binary on PATH).
+A HuggingFace Space (`sdk: gradio`). `app.py` is a Gradio app that annotates images and
+videos with bounding boxes / masks, built on the `pilbox.py` annotation module (the web-UI
+counterpart of `annotate_cli.py`). `boxer.py` is a bounding-box utility module (format
+conversion, IoU). `ffmpret.py` is a video-extraction module/CLI (frames / metadata / audio)
+built on `ffmpeg-python`. `vidbox.py` ties them together to annotate video and backs the
+app's **Annotate Video** tab.
+No models, no GPU — deps are gradio + numpy + Pillow + loguru + typer + ffmpeg-python + tqdm.
+The video features (`ffmpret.py`, `vidbox.py`, and hence the running app) also need a system
+`ffmpeg` binary on PATH — the app now imports `vidbox` → `ffmpeg-python`, so it is no longer
+pure-`pilbox`.
 
 ## Environment & commands
 
@@ -53,14 +56,22 @@ commit the JSON.
 
 ## app.py architecture
 
-- A `gr.TabbedInterface` combining three `gr.Interface`s — no image logic lives in `app.py`;
-  each callback delegates to `pilbox`.
+- A `gr.TabbedInterface` combining four `gr.Interface`s — no image/video logic lives in
+  `app.py`; each callback delegates to `pilbox` / `vidbox`.
   - **Annotate** tab: `annotate_image(...)` → `pilbox.annotate` (`api_name="annotate"`).
     Inputs mirror the CLI options: image, pascal_voc JSON (paste-in `gr.Code`), `label_key`,
     `color_key`, `mask_key`, `mask_alpha`, `width`, `font_size`; output is the annotated image.
     When an object carries a base64-PNG mask under `mask_key` (default `"b64_mask"`), it is
     overlaid as a translucent mask **beneath** the box, colored to match that object's box
     (same `color_key` value → same color). Clearing the `Mask key` field disables masks.
+  - **Annotate Video** tab: `annotate_video(...)` → `vidbox.annotate_video`
+    (`api_name="annotate_video"`). Inputs are a `gr.Video`, a detections JSON **file upload**
+    (`gr.File` — the mask JSON is large, so not a paste-in `gr.Code`), a `gr.Dropdown` of the
+    four `boxer.BBOX_FORMATS` (default `coco_normalized`), a comma-separated `coord_keys`
+    textbox (default `"x,y,w,h"`), then `label_key` / `color_key` / `mask_key` (default
+    `"mask_b64"`, matching the SAM2 example data) / `mask_alpha` / `width` / `font_size`
+    mirroring the image Annotate tab. Output is a silent annotated video at source
+    resolution/fps. Each distinct `color_key` value keeps one stable color across all frames.
   - **Crop** tab: `crop_image(...)` → `pilbox.crop` (`api_name="crop"`). Inputs are an image
     plus manual `gr.Number` fields `x0/y0/x1/y1` (pascal_voc box); output is the cropped
     region.
@@ -69,22 +80,32 @@ commit the JSON.
     `gr.ColorPicker` background color (default black `#000000`); output is the foreground cut
     out over that solid background. The color picker is a `string` in the API/MCP schema
     (a CSS color); `_rgb_from_css` converts `#rrggbb`/`rgba(...)` to an RGB tuple.
-- The demo example (image + JSON) is loaded from `assets/` at import via `_load_example()`,
-  guarded so a missing asset doesn't crash startup; `_example_mask()` pulls the first object's
-  `b64_mask` out of that JSON to preload the Mask tab (empty when assets are absent).
-- Bad JSON (annotate), invalid crop boxes, and undecodable/mismatched masks are surfaced to the
-  user as a `gr.Error` (`pilbox.crop` / `pilbox.apply_mask` raise `ValueError`, re-raised as
-  `gr.Error`).
+- Demo examples are loaded from `assets/` at import, each guarded so a missing asset doesn't
+  crash startup: `_load_example()` (image + JSON), `_example_mask()` (first object's
+  `b64_mask` for the Mask tab), and `_load_video_example()` (the SAM2 video +
+  `*-with_mask.json` for the Annotate Video tab). All assets are git-ignored, so on the Space
+  the examples are simply absent.
+- Bad JSON, invalid crop boxes, undecodable/mismatched masks, and unknown bbox formats are
+  surfaced as a `gr.Error` (`pilbox.crop` / `pilbox.apply_mask` / `vidbox.annotate_video`
+  raise `ValueError`, re-raised as `gr.Error`).
 - Launched under `if __name__ == "__main__"` with `mcp_server=True` and `docs_url="/docs"`
-  (MCP server + FastAPI Swagger docs); each tab's endpoint (`annotate`, `crop`, `mask`) is
-  exposed as its own MCP tool. MCP tool name = the Python function name (`annotate_image` /
-  `crop_image` / `mask_image`), not `api_name`.
+  (MCP server + FastAPI Swagger docs); each tab's endpoint (`annotate`, `annotate_video`,
+  `crop`, `mask`) is exposed as its own MCP tool. MCP tool name = the Python function name
+  (`annotate_image` / `annotate_video` / `crop_image` / `mask_image`), not `api_name`.
 
 ## Bounding-box conventions (boxer.py)
 
 - Standard bbox dict is `{x0, y0, x1, y1}` (top-left / bottom-right absolute pixels).
   Note `boxer()` returns `{x1, x2, y1, y2}` instead — a different key convention.
+- `to_pascal_voc(coords, fmt, im_w, im_h) -> {x0,y0,x1,y1}` converts any of the four
+  supported formats in `BBOX_FORMATS` to pascal_voc absolute pixels: `pascal_voc`
+  `[x0,y0,x1,y1]` abs, `albumentations` `[x0,y0,x1,y1]` norm, `coco` `[x0,y0,w,h]` abs,
+  `coco_normalized` `[x0,y0,w,h]` norm. It reuses `get_bbox_dict` for the coco variants and is
+  format-explicit — it does **not** use `bbox_convert` (whose `all(coord<=1)` auto-detect is
+  fragile and would mis-convert an absolute box). This is what `vidbox` calls per detection.
 - `bbox_convert` auto-detects relative vs absolute by testing whether all coords are `<= 1`.
+- `bbox_intersects` uses the standard axis-aligned overlap test (fixed: the old corner-in-rect
+  checks missed "cross" overlaps); `get_bbox_iou` builds on it.
 - `bboxes_to_im_mask` and image crops use numpy `[y, x]` (row, col) indexing throughout.
 
 ## pilbox.py — lite bbox annotation module
@@ -95,12 +116,15 @@ dict `{x0, y0, x1, y1}` of absolute top-left / bottom-right pixels (matching the
 `boundingBox` in `assets/example_0.json`).
 
 - `annotate(image, objects, *, label_key="object_id", color_key="object_id",
-  bbox_key="boundingBox", mask_key="b64_mask", mask_alpha=0.5, width=3, font=None) ->
-  Image.Image` is the main entry point. It returns an annotated **copy** (never mutates the
-  input). Each distinct `color_key` value gets its own color; `label_key`'s value is drawn as
-  a filled label tab above the box's top-left corner. Colors are pre-assigned in object order
-  so an object's mask and box always share one color; masks are composited in a first pass
-  (beneath) and boxes/labels in a second pass (on top). `mask_key=""` disables masks.
+  bbox_key="boundingBox", mask_key="b64_mask", mask_alpha=0.5, width=3, font=None,
+  color_map=None) -> Image.Image` is the main entry point. It returns an annotated **copy**
+  (never mutates the input). Each distinct `color_key` value gets its own color; `label_key`'s
+  value is drawn as a filled label tab above the box's top-left corner. Colors are pre-assigned
+  in object order so an object's mask and box always share one color; masks are composited in a
+  first pass (beneath) and boxes/labels in a second pass (on top). `mask_key=""` disables masks.
+  Pass a shared (optionally pre-seeded) `color_map` dict to keep a `color_key` value's color
+  stable across **multiple** `annotate` calls — this is how `vidbox` keeps a track id one color
+  across every video frame; default `None` = a fresh per-call map.
 - Colors come from `palette_color(index)` — golden-angle HSV hues, so the palette is
   **unbounded** (never runs out). `color_for(key, mapping)` assigns a stable palette index
   per unique key. (`PIL.ImageColor.colormap` is the named-color alternative.)
@@ -133,13 +157,12 @@ uv run python annotate_cli.py assets/example_0_in.jpg assets/example_0.json -o o
 ```
 
 
-## ffmpret.py — video extraction CLI (standalone)
+## ffmpret.py — video I/O (frames / metadata / audio)
 
-A standalone typer CLI (typer + loguru) for pulling stills/metadata/audio out of a video via
-`ffmpeg-python`. It depends on `ffmpeg-python` + `tqdm` + a system `ffmpeg` binary, so it is
-kept separate from the lite `pilbox`/app path and is **not** imported by `app.py` (yet — the
-intended next step is an "annotate video" feature reusing `pilbox` across frames). All
-commands probe the video once via `get_video_metadata`.
+A typer CLI + importable module (typer + loguru) for pulling stills/metadata/audio out of a
+video and encoding frames back into one, via `ffmpeg-python`. Depends on `ffmpeg-python` +
+`tqdm` + a system `ffmpeg` binary. Imported by `vidbox.py` (and hence transitively by
+`app.py`). All commands probe the video once via `get_video_metadata`.
 
 - `get_video_metadata(video_path, bverbose=True) -> dict` probes width/height/duration/fps/
   codecs/bitrates/size. `duration` falls back to the container (`format`) duration when the
@@ -149,13 +172,19 @@ commands probe the video once via `get_video_metadata`.
 - `extract_frames(input_path, fps=8, max_short_edge=1080, write_timestamp=True,
   write_frame_num=True, output_dir=None, out_vid_path=None, text_font_size=20,
   text_y_position="bottom") -> list[PIL.Image]` decodes frames by piping ffmpeg `rawvideo`
-  to stdout. Requested `fps` is capped to source fps; frames may be scaled down so the short
-  edge ≤ `max_short_edge`. An optional `drawtext` overlay stamps timestamp/frame-number
+  to stdout. Requested `fps` is capped to source fps; **`fps=None` skips resampling and
+  extracts every native frame** (so output index i == source frame i — what `vidbox` needs
+  for frame-accurate annotation). Frames may be scaled down so the short edge ≤
+  `max_short_edge`. An optional `drawtext` overlay stamps timestamp/frame-number
   (`text_y_position` ∈ {top, middle, bottom}); it uses ffmpeg's default font. Saves to
   `{output_dir}/{vname}_{i}.jpg` and/or re-encodes to `out_vid_path` when given.
   **stderr is intentionally left to inherit (not piped)** while only stdout is read — piping
   an undrained stderr deadlocks ffmpeg on longer clips. The read loop runs until the pipe is
-  exhausted (`total_frames = duration*fps` is only the tqdm estimate).
+  exhausted (`total_frames` is only the tqdm estimate).
+- `frames_to_video(frames, out_path, fps, *, vcodec="libx264", pix_fmt="yuv420p") -> out_path`
+  is the inverse: pipes a list of same-size PIL frames to ffmpeg's stdin as `rawvideo` and
+  encodes a (silent) video (scaling to even dimensions for yuv420p). Used by `vidbox`. Only
+  stdin is piped, so there's no stderr deadlock.
 - `extract_specific_frames(input_path, timestamps_or_frames, max_short_edge=1080,
   as_timestamps=True, output_dir=None) -> list` grabs one frame per timestamp/frame number
   (one ffmpeg process each), keeping the list index-aligned with the input (failed grabs →
@@ -173,6 +202,34 @@ uv run python ffmpret.py get-video-metadata clip.mp4
 uv run python ffmpret.py extract-frames clip.mp4 --fps 8 --output-dir frames/
 uv run python ffmpret.py extract-audio clip.mp4 --output-dir audio/           # mp3
 uv run python ffmpret.py extract-audio clip.mp4 --output-dir audio/ --lossless # m4a copy
+```
+
+
+## vidbox.py — video annotation (ties ffmpret + boxer + pilbox)
+
+The video counterpart of `pilbox.annotate`; backs the app's **Annotate Video** tab and adds
+no new deps (it imports the three existing modules). Keeps `pilbox` lite by living in its own
+module.
+
+- `annotate_video(video_path, detections, out_path, *, bbox_format="coco_normalized",
+  coord_keys=("x","y","w","h"), frame_key="frame", label_key="track_id",
+  color_key="track_id", mask_key="mask_b64", mask_alpha=0.5, width=3, font_size=20) ->
+  out_path`. `detections` is a **flat** list of per-frame dicts (frame index under
+  `frame_key`, box values under `coord_keys` read positionally per `bbox_format`, optional
+  `label_key`/`color_key`/`mask_key`). It: probes metadata → extracts **every native frame**
+  (`ffmpret.extract_frames(fps=None)`) → groups detections by frame → converts each box via
+  `boxer.to_pascal_voc` → `pilbox.annotate`s each frame with a **shared pre-seeded
+  `color_map`** (stable per-`color_key` color across frames) → re-encodes with
+  `ffmpret.frames_to_video` at source fps. Masks (`mask_key`) are full-frame base64 PNGs, so
+  annotation is at **native resolution** (no downscale) to keep them aligned. Detections whose
+  frame index exceeds the decoded frame count are warned + skipped. Raises `ValueError` on an
+  unknown `bbox_format` or zero decoded frames.
+- CLI `annotate_video_file` (comma-separated `--coord-keys`); a `@app.callback()` keeps the
+  subcommand name (Typer otherwise collapses a lone command).
+
+```bash
+uv run python vidbox.py annotate-video-file in.mp4 dets.json out.mp4 \
+    --bbox-format coco_normalized
 ```
 
 

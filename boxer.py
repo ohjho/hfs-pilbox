@@ -1,8 +1,62 @@
 ###############################################################################
 # Home of all Boudning Box Utility Functions
 ###############################################################################
-import os, sys, json
 import numpy as np
+
+
+# Supported bounding-box conventions, all converted to pascal_voc {x0,y0,x1,y1}.
+BBOX_FORMATS = ("pascal_voc", "albumentations", "coco", "coco_normalized")
+
+
+def to_pascal_voc(coords, fmt: str, im_w: int, im_h: int) -> dict:
+    """Convert a bounding box in any supported format to pascal_voc.
+
+    All formats collapse to the pascal_voc convention — a dict of absolute
+    top-left/bottom-right pixels ``{x0, y0, x1, y1}`` (matching :func:`get_bbox_dict`
+    and ``pilbox``). Given four ordered values ``(c0, c1, c2, c3)``:
+
+    - ``pascal_voc``: ``(x0, y0, x1, y1)`` absolute pixels.
+    - ``albumentations``: ``(x0, y0, x1, y1)`` normalized to ``[0, 1]``.
+    - ``coco``: ``(x0, y0, w, h)`` absolute pixels (top-left + size).
+    - ``coco_normalized``: ``(x0, y0, w, h)`` normalized to ``[0, 1]``.
+
+    Args:
+        coords: The four box values ``(c0, c1, c2, c3)`` in the given ``fmt``.
+        fmt: One of :data:`BBOX_FORMATS`.
+        im_w: Reference image width in pixels (for the normalized formats).
+        im_h: Reference image height in pixels (for the normalized formats).
+
+    Returns:
+        ``{"x0", "y0", "x1", "y1"}`` of absolute integer pixels.
+
+    Raises:
+        ValueError: If ``fmt`` is not one of :data:`BBOX_FORMATS`.
+
+    >>> to_pascal_voc((10, 20, 40, 60), "pascal_voc", 100, 100)
+    {'x0': 10, 'y0': 20, 'x1': 40, 'y1': 60}
+    >>> to_pascal_voc((0.1, 0.2, 0.4, 0.6), "albumentations", 100, 200)
+    {'x0': 10, 'y0': 40, 'x1': 40, 'y1': 120}
+    >>> to_pascal_voc((10, 20, 30, 40), "coco", 100, 100)
+    {'x0': 10, 'y0': 20, 'x1': 40, 'y1': 60}
+    >>> to_pascal_voc((0.1, 0.2, 0.3, 0.4), "coco_normalized", 100, 200)
+    {'x0': 10, 'y0': 40, 'x1': 40, 'y1': 120}
+    """
+    c0, c1, c2, c3 = coords
+    if fmt == "pascal_voc":
+        return {"x0": int(c0), "y0": int(c1), "x1": int(c2), "y1": int(c3)}
+    if fmt == "albumentations":
+        return {
+            "x0": int(c0 * im_w),
+            "y0": int(c1 * im_h),
+            "x1": int(c2 * im_w),
+            "y1": int(c3 * im_h),
+        }
+    if fmt == "coco":
+        return get_bbox_dict(c0, c1, c2, c3)
+    if fmt == "coco_normalized":
+        return get_bbox_dict(c0, c1, c2, c3, im_wh=(im_w, im_h))
+    raise ValueError(f"unknown bbox format {fmt!r}; expected one of {list(BBOX_FORMATS)}")
+
 
 def get_bbox_dict(x, y, width, height, im_wh = None)-> dict:
     '''given top-left (x,y), return a bbox dict with absolute coordinates x0, y0, x1, y1
@@ -63,23 +117,27 @@ def bboxes_to_im_mask(l_bboxes, im_wh):
     return mask
 
 def bbox_intersects(bbox_a, bbox_b):
-    if bbox_b['x0'] >= bbox_a['x0'] and bbox_b['x0'] <= bbox_a['x1'] and \
-        bbox_b['y0'] >= bbox_a['y0'] and bbox_b['y0'] <= bbox_a['y1']:
-        # top-left of b within a
-        return True
-    elif bbox_b['x1'] >= bbox_a['x0'] and bbox_b['x1'] <= bbox_a['x1'] and \
-        bbox_b['y1'] >= bbox_a['y0'] and bbox_b['y1'] <= bbox_a['y1']:
-        # bottom-right of b within a
-        return True
-    elif bbox_a['x0'] >= bbox_b['x0'] and bbox_a['x0'] <= bbox_b['x1'] and \
-        bbox_a['y0'] >= bbox_b['y0'] and bbox_a['y0'] <= bbox_b['y1']:
-        # top-left of a within b
-        return True
-    elif bbox_a['x1'] >= bbox_b['x0'] and bbox_a['x1'] <= bbox_b['x1'] and \
-        bbox_a['y1'] >= bbox_b['y0'] and bbox_a['y1'] <= bbox_b['y1']:
-        # bottom-right of a within b
-        return True
-    return False
+    '''return True if two pascal_voc boxes overlap.
+
+    Uses the standard axis-aligned overlap test rather than corner-in-rect
+    checks: the latter miss "cross" overlaps where the boxes intersect but no
+    corner of either lies inside the other (e.g. a tall thin box crossing a
+    short wide one).
+
+    >>> a = {'x0': 0, 'y0': 0, 'x1': 10, 'y1': 10}
+    >>> bbox_intersects(a, {'x0': 5, 'y0': 5, 'x1': 15, 'y1': 15})
+    True
+    >>> bbox_intersects(a, {'x0': 20, 'y0': 20, 'x1': 30, 'y1': 30})
+    False
+    >>> # cross overlap: no corner of either box is inside the other
+    >>> bbox_intersects({'x0': 4, 'y0': 0, 'x1': 6, 'y1': 10},
+    ...                 {'x0': 0, 'y0': 4, 'x1': 10, 'y1': 6})
+    True
+    '''
+    return (
+        bbox_a['x0'] <= bbox_b['x1'] and bbox_a['x1'] >= bbox_b['x0']
+        and bbox_a['y0'] <= bbox_b['y1'] and bbox_a['y1'] >= bbox_b['y0']
+    )
 
 def bbox_area(x0, y0, x1, y1):
     return (x1-x0+1) * (y1-y0+1)

@@ -5,13 +5,16 @@ Web-UI counterpart of ``annotate_cli.py`` — paste a list of objects (each with
 """
 
 import json
+import tempfile
 from pathlib import Path
 
 import gradio as gr
 from loguru import logger
 from PIL import ImageColor
 
+import boxer
 import pilbox
+import vidbox
 
 ASSETS = Path(__file__).parent / "assets"
 
@@ -59,6 +62,23 @@ def _example_mask():
 
 
 EXAMPLE_MASK = _example_mask()
+
+
+def _load_video_example():
+    """Return ``(video_path, detections_json_path)`` for the video demo example.
+
+    Both assets live in ``assets/`` but are git-ignored and not deployed to the
+    Space, so both are optional; returns ``(None, None)`` when either is absent.
+    """
+    video_path = ASSETS / "17078229_3222904.mp4"
+    json_path = ASSETS / "17078229_3222904-SAM2_tiny_ZeroGPU-with_mask.json"
+    if not (video_path.exists() and json_path.exists()):
+        logger.info("video example assets not found in {}; running without one", ASSETS)
+        return None, None
+    return str(video_path), str(json_path)
+
+
+EXAMPLE_VIDEO, EXAMPLE_VIDEO_JSON = _load_video_example()
 
 
 def annotate_image(
@@ -165,6 +185,74 @@ def mask_image(image, b64_mask, bg_color):
         raise gr.Error(str(e))
 
 
+def annotate_video(
+    video_path,
+    boxes_json_file,
+    bbox_format,
+    coord_keys,
+    label_key,
+    color_key,
+    mask_key,
+    mask_alpha,
+    width,
+    font_size,
+) -> str:
+    """Draw per-frame bounding boxes (and optional masks) onto every frame of a video and return the annotated video.
+
+    Takes a video plus a detections JSON file — a flat JSON list of per-frame detection objects. Each
+    object holds a 0-based frame index under the "frame" key, the box coordinates under the four keys
+    named by coord_keys (default "x,y,w,h", read in that order), and optionally a label value, a color
+    value, and a base64-encoded PNG mask the same pixel size as the video frame. Every detection is
+    drawn on its frame; each distinct color_key value keeps ONE stable color across the whole video (so
+    a track id is one consistent color), and any mask is drawn as a translucent overlay beneath the box
+    in that same color. The output is a new silent video at the source resolution and frame rate with
+    all boxes, labels, and masks burned in. The box coordinates are interpreted per bbox_format, one of:
+    "pascal_voc" = [x0, y0, x1, y1] absolute pixels; "albumentations" = [x0, y0, x1, y1] normalized 0-1;
+    "coco" = [x0, y0, width, height] absolute pixels; "coco_normalized" = [x0, y0, width, height]
+    normalized 0-1 — as documented at
+    https://albumentations.ai/docs/3-basic-usage/bounding-boxes-augmentations/#bounding-box-formats .
+
+    Args:
+        video_path: The input video file to annotate.
+        boxes_json_file: A .json file holding a flat list of per-frame detection objects (see above).
+        bbox_format: Box coordinate convention: one of "pascal_voc", "albumentations", "coco", or "coco_normalized".
+        coord_keys: Comma-separated names of the four object keys holding the box values, in order (default "x,y,w,h").
+        label_key: Name of the object field whose value is drawn as each box's text label.
+        color_key: Name of the object field used to color-group boxes and masks; each distinct value gets one stable color across all frames.
+        mask_key: Name of the object field holding a base64-encoded PNG mask; leave empty to disable mask drawing.
+        mask_alpha: Mask overlay opacity from 0.0 (invisible) to 1.0 (solid color).
+        width: Box outline width in pixels.
+        font_size: Label font size in points.
+    """
+    if video_path is None:
+        raise gr.Error("Please provide an input video.")
+    if not boxes_json_file:
+        raise gr.Error("Please provide a detections JSON file.")
+    try:
+        with open(boxes_json_file) as f:
+            detections = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        raise gr.Error(f"Could not read detections JSON: {e}")
+
+    out_path = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False).name
+    try:
+        return vidbox.annotate_video(
+            video_path,
+            detections,
+            out_path,
+            bbox_format=bbox_format,
+            coord_keys=tuple(k.strip() for k in coord_keys.split(",")),
+            label_key=label_key,
+            color_key=color_key,
+            mask_key=mask_key,
+            mask_alpha=float(mask_alpha),
+            width=int(width),
+            font_size=int(font_size),
+        )
+    except (ValueError, KeyError) as e:
+        raise gr.Error(str(e))
+
+
 annotate_interface = gr.Interface(
     fn=annotate_image,
     inputs=[
@@ -190,6 +278,48 @@ annotate_interface = gr.Interface(
     title="PILBox — Bounding Box Annotator",
     description="Draw pascal_voc bounding boxes on an image using numpy + Pillow.",
     api_name="annotate",
+)
+
+annotate_video_interface = gr.Interface(
+    fn=annotate_video,
+    inputs=[
+        gr.Video(label="Input Video"),
+        gr.File(label="Detections JSON", file_types=[".json"], type="filepath"),
+        gr.Dropdown(
+            choices=list(boxer.BBOX_FORMATS),
+            value="coco_normalized",
+            label="Box format",
+        ),
+        gr.Textbox(value="x,y,w,h", label="Coordinate keys (comma-separated)"),
+        gr.Textbox(value="track_id", label="Label key"),
+        gr.Textbox(value="track_id", label="Color key"),
+        gr.Textbox(value="mask_b64", label="Mask key"),
+        gr.Slider(0, 1, value=0.5, step=0.05, label="Mask opacity"),
+        gr.Slider(1, 10, value=3, step=1, label="Box width"),
+        gr.Slider(8, 60, value=20, step=1, label="Font size"),
+    ],
+    outputs=gr.Video(label="Annotated Video"),
+    examples=(
+        [
+            [
+                EXAMPLE_VIDEO,
+                EXAMPLE_VIDEO_JSON,
+                "coco_normalized",
+                "x,y,w,h",
+                "track_id",
+                "track_id",
+                "mask_b64",
+                0.5,
+                3,
+                20,
+            ]
+        ]
+        if EXAMPLE_VIDEO and EXAMPLE_VIDEO_JSON
+        else None
+    ),
+    title="PILBox — Video Annotator",
+    description="Draw per-frame bounding boxes and masks over a video (pascal_voc / albumentations / coco / coco_normalized).",
+    api_name="annotate_video",
 )
 
 crop_interface = gr.Interface(
@@ -229,8 +359,8 @@ mask_interface = gr.Interface(
 )
 
 app = gr.TabbedInterface(
-    [annotate_interface, crop_interface, mask_interface],
-    ["Annotate", "Crop", "Mask"],
+    [annotate_interface, annotate_video_interface, crop_interface, mask_interface],
+    ["Annotate", "Annotate Video", "Crop", "Mask"],
     title="PILBox",
 )
 
