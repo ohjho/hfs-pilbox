@@ -18,6 +18,8 @@ wheels/
 *.png
 *.gif
 *.webp
+*.mp3
+*.mp4
 
 # Example data lives in assets/ for local use only (not deployed to the Space).
 assets/*.json

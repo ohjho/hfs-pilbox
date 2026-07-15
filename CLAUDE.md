@@ -7,7 +7,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 A HuggingFace Space (`sdk: gradio`). `app.py` is a Gradio app that draws pascal_voc
 bounding boxes on an image (the web-UI counterpart of `annotate_cli.py`), built on the
 `pilbox.py` annotation module. `boxer.py` is a standalone bounding-box utility module.
-No models, no GPU — deps are just gradio + numpy + Pillow + loguru + typer.
+`ffmpret.py` is a standalone video-extraction CLI (frames / metadata / audio) built on
+`ffmpeg-python`; it is not yet wired into the Gradio app.
+No models, no GPU — deps are gradio + numpy + Pillow + loguru + typer, plus ffmpeg-python +
+tqdm for `ffmpret.py` (which also needs a system `ffmpeg` binary on PATH).
 
 ## Environment & commands
 
@@ -20,7 +23,10 @@ uv run python app.py    # launch the Gradio app locally (also starts an MCP serv
 uv add <pkg>            # add a dependency (updates pyproject.toml + uv.lock)
 ```
 
-There is no test suite, linter config, or build step in this repo.
+Tests live in `tests/` (pytest). Run them as `uv run python -m pytest tests/` — the
+`python -m` form puts the repo root on `sys.path` so the top-level modules (`pilbox`,
+`ffmpret`) import; plain `pytest tests/` fails to resolve them. There is no linter config
+or build step in this repo.
 
 ## Deployment (important)
 
@@ -124,6 +130,49 @@ CLI: `annotate_cli.py` (typer + loguru, run separately so `import pilbox` stays 
 ```bash
 uv run python annotate_cli.py assets/example_0_in.jpg assets/example_0.json -o out.jpg
 # options: --label-key --color-key --mask-key --mask-alpha --width --font-size
+```
+
+
+## ffmpret.py — video extraction CLI (standalone)
+
+A standalone typer CLI (typer + loguru) for pulling stills/metadata/audio out of a video via
+`ffmpeg-python`. It depends on `ffmpeg-python` + `tqdm` + a system `ffmpeg` binary, so it is
+kept separate from the lite `pilbox`/app path and is **not** imported by `app.py` (yet — the
+intended next step is an "annotate video" feature reusing `pilbox` across frames). All
+commands probe the video once via `get_video_metadata`.
+
+- `get_video_metadata(video_path, bverbose=True) -> dict` probes width/height/duration/fps/
+  codecs/bitrates/size. `duration` falls back to the container (`format`) duration when the
+  video stream omits it (common for MKV/WebM) so downstream frame counts aren't silently 0.
+  Raises (does not return `None`) when there's no video stream, so failures are legible to
+  the callers that subscript the result.
+- `extract_frames(input_path, fps=8, max_short_edge=1080, write_timestamp=True,
+  write_frame_num=True, output_dir=None, out_vid_path=None, text_font_size=20,
+  text_y_position="bottom") -> list[PIL.Image]` decodes frames by piping ffmpeg `rawvideo`
+  to stdout. Requested `fps` is capped to source fps; frames may be scaled down so the short
+  edge ≤ `max_short_edge`. An optional `drawtext` overlay stamps timestamp/frame-number
+  (`text_y_position` ∈ {top, middle, bottom}); it uses ffmpeg's default font. Saves to
+  `{output_dir}/{vname}_{i}.jpg` and/or re-encodes to `out_vid_path` when given.
+  **stderr is intentionally left to inherit (not piped)** while only stdout is read — piping
+  an undrained stderr deadlocks ffmpeg on longer clips. The read loop runs until the pipe is
+  exhausted (`total_frames = duration*fps` is only the tqdm estimate).
+- `extract_specific_frames(input_path, timestamps_or_frames, max_short_edge=1080,
+  as_timestamps=True, output_dir=None) -> list` grabs one frame per timestamp/frame number
+  (one ffmpeg process each), keeping the list index-aligned with the input (failed grabs →
+  `None`). `-ss` is an input option (fast keyframe seek); see the in-code note for exact-seek.
+- `extract_audio(video_path, output_dir=None, overwrite=False, lossless=False) -> str|None`
+  extracts the audio track to `{output_dir}/{vname}/{vname}.{ext}` (`output_dir` defaults to
+  the video's own directory). Default re-encodes to **mp3**; `lossless=True` copies the stream
+  (`acodec=copy`) into **m4a**. Returns `None` (logs an error) when the video has no audio or
+  the output exists and `overwrite=False`.
+- `parse_frame_name("my_clip_12.jpg") -> ("my_clip", 12)` splits on the **last** `_` so frame
+  types containing underscores round-trip.
+
+```bash
+uv run python ffmpret.py get-video-metadata clip.mp4
+uv run python ffmpret.py extract-frames clip.mp4 --fps 8 --output-dir frames/
+uv run python ffmpret.py extract-audio clip.mp4 --output-dir audio/           # mp3
+uv run python ffmpret.py extract-audio clip.mp4 --output-dir audio/ --lossless # m4a copy
 ```
 
 
