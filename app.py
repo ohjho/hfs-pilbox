@@ -41,8 +41,10 @@ def _load_example():
 EXAMPLE_IMAGE, EXAMPLE_JSON = _load_example()
 
 
-def annotate_image(image, boxes_json, label_key, color_key, width, font_size):
-    """Draw pascal_voc bounding boxes onto an image and return the annotated image.
+def annotate_image(
+    image, boxes_json, label_key, color_key, mask_key, mask_alpha, width, font_size
+):
+    """Draw pascal_voc bounding boxes (and optional segmentation masks) onto an image and return the annotated image.
 
     boxes_json is a JSON list of object dicts. Each object holds its box under a "boundingBox"
     key as {"x0", "y0", "x1", "y1"}: (x0, y0) is the top-left corner and (x1, y1) is the
@@ -50,13 +52,18 @@ def annotate_image(image, boxes_json, label_key, color_key, width, font_size):
     documented at
     https://albumentations.ai/docs/3-basic-usage/bounding-boxes-augmentations/#bounding-box-formats ).
     NOT normalized to 0-1 and NOT [x, y, width, height]. Each object may also carry the label_key
-    and color_key fields. The output is the input image with every box drawn on it.
+    and color_key fields, plus a mask_key field holding a base64-encoded PNG mask. When an object
+    has a mask, it is drawn as a translucent colored overlay beneath the box, using the SAME color
+    as that object's box (both derived from color_key). The output is the input image with every
+    mask and box drawn on it.
 
     Args:
         image: The RGB image to annotate.
-        boxes_json: JSON text — a list of object dicts, each with a "boundingBox" {x0, y0, x1, y1} and optional label/color fields.
+        boxes_json: JSON text — a list of object dicts, each with a "boundingBox" {x0, y0, x1, y1} and optional label/color/mask fields.
         label_key: Name of the object field whose value is drawn as each box's text label.
-        color_key: Name of the object field used to color-group boxes (each distinct value gets its own color).
+        color_key: Name of the object field used to color-group boxes and masks (each distinct value gets its own color).
+        mask_key: Name of the object field holding a base64-encoded PNG mask; leave empty to disable mask drawing.
+        mask_alpha: Mask overlay opacity from 0.0 (invisible) to 1.0 (solid color).
         width: Box outline width in pixels.
         font_size: Label font size in points.
     """
@@ -73,6 +80,8 @@ def annotate_image(image, boxes_json, label_key, color_key, width, font_size):
         objects,
         label_key=label_key,
         color_key=color_key,
+        mask_key=mask_key,
+        mask_alpha=float(mask_alpha),
         width=int(width),
         font=font,
     )
@@ -115,12 +124,14 @@ annotate_interface = gr.Interface(
         ),
         gr.Textbox(value="object_id", label="Label key"),
         gr.Textbox(value="object_id", label="Color key"),
+        gr.Textbox(value="b64_mask", label="Mask key"),
+        gr.Slider(0, 1, value=0.5, step=0.05, label="Mask opacity"),
         gr.Slider(1, 10, value=3, step=1, label="Box width"),
         gr.Slider(8, 60, value=20, step=1, label="Font size"),
     ],
     outputs=gr.Image(type="pil", label="Annotated Image"),
     examples=(
-        [[EXAMPLE_IMAGE, EXAMPLE_JSON, "object_id", "object_id", 3, 20]]
+        [[EXAMPLE_IMAGE, EXAMPLE_JSON, "object_id", "object_id", "b64_mask", 0.5, 3, 20]]
         if EXAMPLE_IMAGE
         else None
     ),

@@ -8,11 +8,13 @@ The only third-party dependencies are ``numpy``, ``Pillow`` and ``loguru``.
 """
 
 import os
+import io
 import json
+import base64
 import colorsys
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageColor, ImageDraw, ImageFont
 from loguru import logger
 
 
@@ -300,6 +302,63 @@ def im_draw_point(
     return im_draw
 
 
+def im_color_mask(
+    im_rgb_array, mask_array, rgb_tup=(91, 86, 188), alpha=0.5, get_pil_im=False
+):
+    """Overlay a translucent solid-color mask onto an RGB image.
+
+    Pixels where ``mask_array`` is truthy are blended toward ``rgb_tup`` by
+    ``alpha``; the rest are left untouched.
+
+    Args:
+        im_rgb_array: RGB image as a ``(H, W, 3)`` ``uint8`` numpy array.
+        mask_array: Boolean/0-1 mask, shape ``(H, W)`` matching the image.
+        rgb_tup: Fill color as an ``(r, g, b)`` tuple.
+        alpha: Blend strength in ``[0, 1]`` — ``0`` fully transparent (image
+            unchanged), ``1`` fully opaque (solid fill over the mask).
+        get_pil_im: If True, return a ``PIL.Image.Image``; otherwise a numpy array.
+
+    Returns:
+        The composited image, as a ``PIL.Image.Image`` when ``get_pil_im`` else a
+        ``(H, W, 3)`` ``uint8`` numpy array.
+
+    Raises:
+        ValueError: If the image and mask height/width do not match.
+
+    >>> import numpy as np
+    >>> img = np.zeros((2, 2, 3), dtype=np.uint8)  # black
+    >>> mask = np.array([[True, False], [False, False]])
+    >>> out = im_color_mask(img, mask, rgb_tup=(255, 0, 0), alpha=0.5)
+    >>> tuple(int(v) for v in out[0, 0])  # masked pixel blended halfway to red
+    (127, 0, 0)
+    >>> tuple(int(v) for v in out[1, 1])  # unmasked pixel untouched
+    (0, 0, 0)
+    """
+    if im_rgb_array.shape[:2] != mask_array.shape[:2]:
+        raise ValueError(
+            f"im_color_mask: image is shape {im_rgb_array.shape[:2]} which is different than mask shape {mask_array.shape[:2]}"
+        )
+
+    bg_im = np.zeros(im_rgb_array.shape, dtype=np.uint8)  # create color
+    bg_im[:, :] = rgb_tup
+    # Coerce the mask to a uint8 alpha layer; a bool*int product is int64,
+    # which Image.fromarray rejects.
+    mask_l = (mask_array.astype(bool) * int(alpha * 255)).astype(np.uint8)
+    im = Image.composite(
+        Image.fromarray(bg_im),
+        Image.fromarray(im_rgb_array),
+        Image.fromarray(mask_l),
+    )
+    return im if get_pil_im else np.array(im)
+
+
+def _mask_from_b64(b64_str: str) -> np.ndarray:
+    """Decode a base64-encoded PNG mask into a boolean ``(H, W)`` numpy array."""
+    raw = base64.b64decode(b64_str)
+    im = Image.open(io.BytesIO(raw))
+    return np.asarray(im.convert("1"), dtype=bool)
+
+
 def annotate(
     image: Image.Image,
     objects,
@@ -307,20 +366,30 @@ def annotate(
     label_key: str = "object_id",
     color_key: str = "object_id",
     bbox_key: str = "boundingBox",
+    mask_key: str = "b64_mask",
+    mask_alpha: float = 0.5,
     width: int = 3,
     font=None,
 ) -> Image.Image:
-    """Draw every object's pascal_voc bounding box on a copy of ``image``.
+    """Draw every object's pascal_voc box (and optional mask) on a copy of ``image``.
+
+    When ``mask_key`` is truthy, each object carrying a base64-encoded PNG mask
+    under that key gets a translucent overlay drawn *beneath* the boxes, colored
+    to match its own bounding box (both derive from the same ``color_key`` value,
+    so an object's box and mask always share one color).
 
     Args:
         image: Source ``PIL.Image.Image`` (never mutated; a copy is returned).
         objects: Iterable of dicts. Each must hold a pascal_voc box under
             ``bbox_key`` as ``{"x0", "y0", "x1", "y1"}`` and, optionally, values
-            under ``label_key`` and ``color_key``.
+            under ``label_key``, ``color_key`` and ``mask_key``.
         label_key: Object key whose value is drawn as the box label.
         color_key: Object key whose value groups boxes into colors (each distinct
             value gets its own palette color).
         bbox_key: Object key holding the pascal_voc box dict.
+        mask_key: Object key holding a base64-encoded PNG mask. Falsy (e.g. ``""``)
+            disables mask drawing entirely; objects lacking the key are skipped.
+        mask_alpha: Mask overlay opacity in ``[0, 1]``.
         width: Box outline width in pixels.
         font: Optional ``PIL.ImageFont`` for labels; defaults to Pillow's default.
 
@@ -337,6 +406,27 @@ def annotate(
     """
     out = image.copy()
     color_map: dict = {}
+    # Assign palette indices once, in object order, so an object's mask and box
+    # resolve to the identical color regardless of which is drawn first.
+    for obj in objects:
+        color_for(obj.get(color_key), color_map)
+
+    # Pass 1: masks, composited beneath the boxes.
+    if mask_key:
+        arr = None
+        for obj in objects:
+            b64 = obj.get(mask_key)
+            if not b64:
+                continue
+            if arr is None:
+                arr = np.asarray(out.convert("RGB"))
+            rgb = ImageColor.getrgb(color_for(obj.get(color_key), color_map))
+            mask = _mask_from_b64(b64)
+            arr = im_color_mask(arr, mask, rgb_tup=rgb, alpha=mask_alpha)
+        if arr is not None:
+            out = Image.fromarray(arr)
+
+    # Pass 2: boxes and labels on top, reusing the shared color map.
     for obj in objects:
         box = obj[bbox_key]
         color = color_for(obj.get(color_key), color_map)
@@ -362,6 +452,8 @@ def annotate_file(
     *,
     label_key: str = "object_id",
     color_key: str = "object_id",
+    mask_key: str = "b64_mask",
+    mask_alpha: float = 0.5,
     width: int = 3,
     font_size: int = 20,
 ) -> str:
@@ -374,6 +466,8 @@ def annotate_file(
         output_path: Where to write the annotated image.
         label_key: Object key drawn as each box's label.
         color_key: Object key used to group boxes into colors.
+        mask_key: Object key holding a base64-encoded PNG mask (falsy disables masks).
+        mask_alpha: Mask overlay opacity in ``[0, 1]``.
         width: Box outline width in pixels.
         font_size: Label font size in points.
 
@@ -389,6 +483,8 @@ def annotate_file(
         objects,
         label_key=label_key,
         color_key=color_key,
+        mask_key=mask_key,
+        mask_alpha=mask_alpha,
         width=width,
         font=font,
     )

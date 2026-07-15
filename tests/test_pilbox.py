@@ -1,10 +1,21 @@
 """Unit tests for the lite pilbox bounding-box annotation module."""
 
+import base64
+import io
+
 import numpy as np
 import pytest
-from PIL import Image
+from PIL import Image, ImageColor
 
 import pilbox
+
+
+def _b64_mask(mask_bool):
+    """Encode a boolean numpy mask as a base64 PNG string (as stored in the JSON)."""
+    im = Image.fromarray(mask_bool.astype(np.uint8) * 255).convert("1")
+    buf = io.BytesIO()
+    im.save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
 def _sample_objects():
@@ -93,3 +104,61 @@ def test_crop_rejects_invalid_box():
         pilbox.crop(im, 10, 20, 40, 20)  # empty y (y1 <= y0)
     with pytest.raises(ValueError):
         pilbox.crop(im, 10, 20, 200, 80)  # x1 exceeds image width
+
+
+def test_im_color_mask_blends_masked_pixels_only():
+    img = np.zeros((4, 4, 3), dtype=np.uint8)  # black
+    mask = np.zeros((4, 4), dtype=bool)
+    mask[0, 0] = True
+
+    out = pilbox.im_color_mask(img, mask, rgb_tup=(255, 0, 0), alpha=0.5)
+
+    assert out.dtype == np.uint8 and out.shape == (4, 4, 3)
+    assert tuple(int(v) for v in out[0, 0]) == (127, 0, 0)  # masked -> halfway to red
+    assert tuple(int(v) for v in out[1, 1]) == (0, 0, 0)  # unmasked untouched
+
+
+def test_im_color_mask_rejects_shape_mismatch():
+    img = np.zeros((4, 4, 3), dtype=np.uint8)
+    bad_mask = np.zeros((4, 2), dtype=bool)  # same height, wrong width
+    with pytest.raises(ValueError):
+        pilbox.im_color_mask(img, bad_mask)
+
+
+def test_annotate_mask_and_box_share_color():
+    im = Image.new("RGB", (40, 40), "white")
+    # object 1's mask covers a patch clear of every box outline
+    mask1 = np.zeros((40, 40), dtype=bool)
+    mask1[25:35, 25:35] = True
+    objs = [
+        {"object_id": 0, "boundingBox": {"x0": 2, "y0": 2, "x1": 10, "y1": 10}},
+        {
+            "object_id": 1,
+            "boundingBox": {"x0": 15, "y0": 15, "x1": 22, "y1": 22},
+            "b64_mask": _b64_mask(mask1),
+        },
+    ]
+
+    out = pilbox.annotate(im, objs, mask_alpha=1.0)
+    arr = np.array(out)
+
+    # object 1's palette color (index 1, since it's the 2nd distinct object_id)
+    expected = ImageColor.getrgb(pilbox.palette_color(1))
+    # a pixel well inside object 1's mask region is filled with that exact color
+    assert tuple(int(v) for v in arr[30, 30]) == expected
+
+
+def test_annotate_empty_mask_key_skips_masks():
+    im = Image.new("RGB", (40, 40), "white")
+    mask = np.ones((40, 40), dtype=bool)
+    objs = [
+        {
+            "object_id": 0,
+            "boundingBox": {"x0": 2, "y0": 2, "x1": 10, "y1": 10},
+            "b64_mask": _b64_mask(mask),
+        }
+    ]
+    # a full-image mask would repaint the corners if drawn; with masks disabled
+    # the far corner stays white.
+    out = pilbox.annotate(im, objs, mask_key="", mask_alpha=1.0)
+    assert tuple(int(v) for v in np.array(out)[38, 38]) == (255, 255, 255)

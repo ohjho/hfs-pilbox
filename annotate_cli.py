@@ -36,6 +36,14 @@ def main(
     color_key: str = typer.Option(
         "object_id", "--color-key", help="Object key used to color-group boxes."
     ),
+    mask_key: str = typer.Option(
+        "b64_mask",
+        "--mask-key",
+        help="Object key holding a base64 PNG mask (empty disables masks).",
+    ),
+    mask_alpha: float = typer.Option(
+        0.5, "--mask-alpha", help="Mask overlay opacity in [0, 1]."
+    ),
     width: int = typer.Option(3, "--width", help="Box outline width in pixels."),
     font_size: int = typer.Option(20, "--font-size", help="Label font size."),
 ):
@@ -48,6 +56,8 @@ def main(
         str(out_path),
         label_key=label_key,
         color_key=color_key,
+        mask_key=mask_key,
+        mask_alpha=mask_alpha,
         width=width,
         font_size=font_size,
     )

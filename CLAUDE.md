@@ -51,7 +51,10 @@ commit the JSON.
   each callback delegates to `pilbox`.
   - **Annotate** tab: `annotate_image(...)` → `pilbox.annotate` (`api_name="annotate"`).
     Inputs mirror the CLI options: image, pascal_voc JSON (paste-in `gr.Code`), `label_key`,
-    `color_key`, `width`, `font_size`; output is the annotated image.
+    `color_key`, `mask_key`, `mask_alpha`, `width`, `font_size`; output is the annotated image.
+    When an object carries a base64-PNG mask under `mask_key` (default `"b64_mask"`), it is
+    overlaid as a translucent mask **beneath** the box, colored to match that object's box
+    (same `color_key` value → same color). Clearing the `Mask key` field disables masks.
   - **Crop** tab: `crop_image(...)` → `pilbox.crop` (`api_name="crop"`). Inputs are an image
     plus manual `gr.Number` fields `x0/y0/x1/y1` (pascal_voc box); output is the cropped
     region.
@@ -79,13 +82,18 @@ dict `{x0, y0, x1, y1}` of absolute top-left / bottom-right pixels (matching the
 `boundingBox` in `assets/example_0.json`).
 
 - `annotate(image, objects, *, label_key="object_id", color_key="object_id",
-  bbox_key="boundingBox", width=3, font=None) -> Image.Image` is the main entry point.
-  It returns an annotated **copy** (never mutates the input). Each distinct `color_key`
-  value gets its own color; `label_key`'s value is drawn as a filled label tab above the
-  box's top-left corner.
+  bbox_key="boundingBox", mask_key="b64_mask", mask_alpha=0.5, width=3, font=None) ->
+  Image.Image` is the main entry point. It returns an annotated **copy** (never mutates the
+  input). Each distinct `color_key` value gets its own color; `label_key`'s value is drawn as
+  a filled label tab above the box's top-left corner. Colors are pre-assigned in object order
+  so an object's mask and box always share one color; masks are composited in a first pass
+  (beneath) and boxes/labels in a second pass (on top). `mask_key=""` disables masks.
 - Colors come from `palette_color(index)` — golden-angle HSV hues, so the palette is
   **unbounded** (never runs out). `color_for(key, mapping)` assigns a stable palette index
   per unique key. (`PIL.ImageColor.colormap` is the named-color alternative.)
+- `im_color_mask(im_rgb_array, mask_array, rgb_tup=..., alpha=0.5, get_pil_im=False)` blends
+  a solid color into the image wherever the boolean mask is set; `_mask_from_b64` decodes a
+  base64-PNG mask to a boolean array. Both back `annotate`'s mask overlay.
 - `annotate_file(image_path, annotations_path, output_path, ...)` wraps load → annotate →
   save for the CLI.
 - `crop(image, x0, y0, x1, y1) -> Image.Image` is a PIL-in/PIL-out wrapper around `im_crop`:
@@ -98,7 +106,7 @@ CLI: `annotate_cli.py` (typer + loguru, run separately so `import pilbox` stays 
 
 ```bash
 uv run python annotate_cli.py assets/example_0_in.jpg assets/example_0.json -o out.jpg
-# options: --label-key --color-key --width --font-size
+# options: --label-key --color-key --mask-key --mask-alpha --width --font-size
 ```
 
 
