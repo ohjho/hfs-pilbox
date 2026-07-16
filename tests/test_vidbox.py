@@ -5,11 +5,14 @@ end-to-end ``annotate_video`` needs the ``ffmpeg`` binary and is skipped without
 it, and the on-disk example assets are optional.
 """
 
+import base64
+import io
 import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
+from PIL import Image, ImageDraw
 
 import vidbox
 
@@ -18,6 +21,16 @@ ASSETS = Path(__file__).resolve().parent.parent / "assets"
 EXAMPLE_VIDEO = ASSETS / "17078229_3222904.mp4"
 EXAMPLE_JSON = ASSETS / "17078229_3222904-SAM2_tiny_ZeroGPU-with_mask.json"
 EXAMPLE_CROP_JSON = ASSETS / "17078229_3222904-VideoCrop-example.json"
+EXAMPLE_MASK_JSON = ASSETS / "17078229_3222904-player1box.json"
+
+
+def _b64_mask(w, h, box):
+    """A full-frame base64-PNG mask (mode '1') with ``box``=(x0,y0,x1,y1) as foreground."""
+    im = Image.new("1", (w, h), 0)
+    ImageDraw.Draw(im).rectangle(box, fill=1)
+    buf = io.BytesIO()
+    im.save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode()
 
 
 def test_annotate_video_rejects_unknown_format():
@@ -130,6 +143,63 @@ def test_annotate_video_end_to_end_on_assets(tmp_path):
     meta = _probe(result)
     assert meta["width"] == "1080" and meta["height"] == "1920"
     assert int(meta["nb_frames"]) == 296  # every native frame preserved
+
+
+def test_mask_video_rejects_conflicting_masks():
+    # same frame, two DIFFERENT masks -> conflict error (raised before ffmpeg runs)
+    dets = [
+        {"frame": 0, "mask_b64": _b64_mask(64, 48, (0, 0, 10, 10))},
+        {"frame": 0, "mask_b64": _b64_mask(64, 48, (20, 20, 40, 40))},
+    ]
+    with pytest.raises(ValueError, match="conflicting"):
+        vidbox.mask_video("x.mp4", dets, "out.mp4")
+
+
+def test_mask_video_rejects_unknown_gap_behavior():
+    with pytest.raises(ValueError):
+        vidbox.mask_video("x.mp4", [], "out.mp4", gap_behavior="nope")
+
+
+def test_mask_video_skip_vs_fill_frame_counts(tiny_video, tmp_path):
+    # masks on 3 frames; frame 0 has an EXACT-duplicate mask row (must dedupe, not error).
+    m = _b64_mask(64, 48, (16, 12, 48, 36))
+    dets = [
+        {"frame": 0, "mask_b64": m},
+        {"frame": 0, "mask_b64": m},  # exact duplicate -> collapses
+        {"frame": 3, "mask_b64": m},
+        {"frame": 6, "mask_b64": m},
+    ]
+    skip_out = vidbox.mask_video(tiny_video, dets, str(tmp_path / "skip.mp4"), gap_behavior="skip")
+    fill_out = vidbox.mask_video(tiny_video, dets, str(tmp_path / "fill.mp4"), gap_behavior="fill")
+
+    skip_meta, fill_meta = _probe(skip_out), _probe(fill_out)
+    # both keep source dims
+    assert skip_meta["width"] == "64" and skip_meta["height"] == "48"
+    assert fill_meta["width"] == "64" and fill_meta["height"] == "48"
+    # skip keeps only the 3 masked frames; fill keeps every native frame (~10 for 1s@10fps)
+    assert int(skip_meta["nb_frames"]) == 3
+    assert int(fill_meta["nb_frames"]) >= 8
+    assert int(fill_meta["nb_frames"]) > int(skip_meta["nb_frames"])
+
+
+@pytest.mark.skipif(
+    not (EXAMPLE_VIDEO.exists() and EXAMPLE_MASK_JSON.exists()),
+    reason="mask example assets not present (git-ignored)",
+)
+def test_mask_video_end_to_end_on_assets(tmp_path):
+    if FFMPEG is None:
+        pytest.skip("ffmpeg binary not available")
+    import json
+
+    # 218 of 296 frames carry a mask; frame 118 is an exact-duplicate row (dedupes)
+    detections = json.loads(EXAMPLE_MASK_JSON.read_text())
+    out = vidbox.mask_video(
+        str(EXAMPLE_VIDEO), detections, str(tmp_path / "masked.mp4"), gap_behavior="skip"
+    )
+    assert Path(out).is_file()
+    meta = _probe(out)
+    assert meta["width"] == "1080" and meta["height"] == "1920"
+    assert int(meta["nb_frames"]) == 218  # gaps skipped
 
 
 @pytest.mark.skipif(

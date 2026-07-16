@@ -100,6 +100,25 @@ def _load_crop_video_example():
 EXAMPLE_CROP_VIDEO, EXAMPLE_CROP_JSON = _load_crop_video_example()
 
 
+def _load_mask_video_example():
+    """Return ``(video_path, mask_json_path)`` for the Mask Video demo example.
+
+    Both assets are git-ignored/not deployed, so both are optional; returns
+    ``(None, None)`` when either is absent.
+    """
+    video_path = ASSETS / "17078229_3222904.mp4"
+    json_path = ASSETS / "17078229_3222904-player1box.json"
+    if not (video_path.exists() and json_path.exists()):
+        logger.info(
+            "mask-video example assets not found in {}; running without one", ASSETS
+        )
+        return None, None
+    return str(video_path), str(json_path)
+
+
+EXAMPLE_MASK_VIDEO, EXAMPLE_MASK_JSON = _load_mask_video_example()
+
+
 def annotate_image(
     image, boxes_json, label_key, color_key, mask_key, mask_alpha, width, font_size
 ):
@@ -328,6 +347,51 @@ def crop_video(
         raise gr.Error(str(e))
 
 
+def mask_video(video_path, mask_json_file, mask_key, bg_color, gap_behavior) -> str:
+    """Mask a video frame-by-frame from a per-frame mask JSON — keep each frame's foreground over a solid background color — and return the masked video.
+
+    Takes a video plus a masks JSON file — a flat JSON list of per-frame objects, each with a 0-based frame index
+    under the "frame" key and a base64-encoded PNG mask under mask_key (default "mask_b64"). The mask must be the
+    SAME pixel size as the video frame: non-zero (white) pixels are the foreground to keep, zero (black) pixels are
+    background. Any bounding boxes in the JSON are IGNORED; only masks are used, and each frame may carry only one
+    mask (exact-duplicate rows are collapsed, but two different masks on a frame is an error). For each frame with a
+    mask the foreground is kept and every background pixel is replaced with bg_color; the output is a new silent
+    video at the source resolution and frame rate. Frames that have NO mask are handled by gap_behavior: "skip"
+    drops them (the output is shorter and jump-cuts over the gaps), while "fill" keeps them as frames painted
+    entirely with bg_color. bg_color is a CSS hex color like "#000000" (the default, black); it fills both the mask
+    background and the "fill" gap frames.
+
+    Args:
+        video_path: The input video file to mask.
+        mask_json_file: A .json file holding a flat list of per-frame mask objects (see above); bounding boxes ignored.
+        mask_key: Name of the object field holding a base64-encoded PNG mask, same size as the video frame.
+        bg_color: Background fill as a CSS hex color string like "#rrggbb"; defaults to black "#000000".
+        gap_behavior: For frames with no mask: "skip" (drop them) or "fill" (keep them, painted entirely with bg_color).
+    """
+    if video_path is None:
+        raise gr.Error("Please provide an input video.")
+    if not mask_json_file:
+        raise gr.Error("Please provide a masks JSON file.")
+    try:
+        with open(mask_json_file) as f:
+            detections = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        raise gr.Error(f"Could not read masks JSON: {e}")
+
+    out_path = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False).name
+    try:
+        return vidbox.mask_video(
+            video_path,
+            detections,
+            out_path,
+            mask_key=mask_key,
+            bg_rgb_tup=_rgb_from_css(bg_color),
+            gap_behavior=gap_behavior,
+        )
+    except (ValueError, KeyError) as e:
+        raise gr.Error(str(e))
+
+
 annotate_interface = gr.Interface(
     fn=annotate_image,
     inputs=[
@@ -484,6 +548,30 @@ mask_interface = gr.Interface(
     api_name="mask",
 )
 
+mask_video_interface = gr.Interface(
+    fn=mask_video,
+    inputs=[
+        gr.Video(label="Input Video"),
+        gr.File(label="Masks JSON", file_types=[".json"], type="filepath"),
+        gr.Textbox(value="mask_b64", label="Mask key"),
+        gr.ColorPicker(value="#000000", label="Background color"),
+        gr.Dropdown(
+            choices=list(vidbox.MASK_GAP_BEHAVIORS),
+            value="fill",
+            label="Frames with no mask",
+        ),
+    ],
+    outputs=gr.Video(label="Masked Video"),
+    examples=(
+        [[EXAMPLE_MASK_VIDEO, EXAMPLE_MASK_JSON, "mask_b64", "#000000", "skip"]]
+        if EXAMPLE_MASK_VIDEO and EXAMPLE_MASK_JSON
+        else None
+    ),
+    title="PILBox — Video Masker",
+    description="Keep each frame's masked foreground over a solid background color, from a per-frame mask JSON (boxes ignored).",
+    api_name="mask_video",
+)
+
 app = gr.TabbedInterface(
     [
         annotate_interface,
@@ -491,8 +579,9 @@ app = gr.TabbedInterface(
         crop_interface,
         crop_video_interface,
         mask_interface,
+        mask_video_interface,
     ],
-    ["Annotate", "Annotate Video", "Crop", "Crop Video", "Mask"],
+    ["Annotate", "Annotate Video", "Crop", "Crop Video", "Mask", "Mask Video"],
     title="PILBox",
 )
 

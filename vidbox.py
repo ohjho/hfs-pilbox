@@ -25,7 +25,7 @@ from collections import defaultdict
 
 import typer
 from loguru import logger
-from PIL import Image
+from PIL import Image, ImageColor
 from typing import Literal
 
 import boxer
@@ -34,6 +34,7 @@ import pilbox
 
 CROP_MODES = ("window", "box_fit")
 GAP_BEHAVIORS = ("jump", "carry_forward")
+MASK_GAP_BEHAVIORS = ("skip", "fill")
 
 logger.remove()
 logger.add(
@@ -329,6 +330,99 @@ def crop_video(
     return ffmpret.frames_to_video(cropped, out_path, fps=fps)
 
 
+def mask_video(
+    video_path: str,
+    detections,
+    out_path: str,
+    *,
+    mask_key: str = "mask_b64",
+    frame_key: str = "frame",
+    bg_rgb_tup=(0, 0, 0),
+    gap_behavior: str = "skip",
+) -> str:
+    """Mask a video per-frame — keep each frame's foreground over a solid background color.
+
+    The video counterpart of :func:`pilbox.apply_mask`: every native frame with a mask keeps
+    its masked foreground and has the background replaced by ``bg_rgb_tup``; the result is
+    re-encoded to a silent video at the source fps. Any bounding boxes in the detections are
+    ignored — only the mask matters.
+
+    Each frame must carry **at most one** mask: exact-duplicate mask rows collapse to one, but a
+    frame with two *different* masks raises ``ValueError``. Frames with no mask are gaps.
+
+    Args:
+        video_path: Path to the input video.
+        detections: List of detection dicts, each with a frame index under ``frame_key`` and a
+            base64-PNG mask (same size as the frame) under ``mask_key``.
+        out_path: Destination path for the masked video.
+        mask_key: Object key holding the base64-encoded PNG mask.
+        frame_key: Object key holding the (0-based) frame index.
+        bg_rgb_tup: Background fill color as an ``(r, g, b)`` tuple — used both behind the mask
+            and to fill gap frames under ``gap_behavior="fill"``.
+        gap_behavior: For frames with no mask — ``"skip"`` (drop them, yielding a shorter video)
+            or ``"fill"`` (keep the frame, painted entirely with ``bg_rgb_tup``).
+
+    Returns:
+        ``out_path``.
+
+    Raises:
+        ValueError: On an unknown ``gap_behavior``, a frame with conflicting masks, no masks at
+            all, or no decoded frames.
+    """
+    if gap_behavior not in MASK_GAP_BEHAVIORS:
+        raise ValueError(
+            f"unknown gap_behavior {gap_behavior!r}; expected one of {list(MASK_GAP_BEHAVIORS)}"
+        )
+
+    # Group by frame; collapse exact-duplicate masks; error on conflicting masks.
+    # Validate the JSON before touching ffmpeg so bad input fails fast.
+    grouped = defaultdict(list)
+    for det in detections:
+        grouped[int(det[frame_key])].append(det)
+
+    mask_by_frame = {}  # frame index -> the frame's single (deduped) mask
+    conflicts = []
+    for f, dets in grouped.items():
+        distinct = {det[mask_key] for det in dets if det.get(mask_key)}
+        if len(distinct) > 1:
+            conflicts.append(f)
+        elif distinct:
+            mask_by_frame[f] = next(iter(distinct))
+    if conflicts:
+        raise ValueError(
+            "expected at most one mask per frame; frames with conflicting masks: "
+            f"{sorted(conflicts)[:20]}"
+        )
+    if not mask_by_frame:
+        raise ValueError("no masks to apply")
+
+    vmeta = ffmpret.get_video_metadata(video_path, bverbose=False)
+    fps = vmeta["fps"]
+
+    frames = ffmpret.extract_frames(video_path, fps=None, write_timestamp=False)
+    if not frames:
+        raise ValueError(f"no frames decoded from {video_path}")
+
+    bg = tuple(bg_rgb_tup)
+    masked = []
+    for i, frame in enumerate(frames):
+        mask = mask_by_frame.get(i)
+        if mask is not None:
+            masked.append(pilbox.apply_mask(frame, mask, bg_rgb_tup=bg))
+        elif gap_behavior == "fill":
+            masked.append(Image.new("RGB", frame.size, bg))
+        # else "skip": omit the frame
+
+    if not masked:
+        raise ValueError("no frames to encode (all frames were gaps and skipped)")
+
+    logger.info(
+        f"masked {len(mask_by_frame)} of {len(frames)} frames "
+        f"(gap={gap_behavior}, kept {len(masked)})"
+    )
+    return ffmpret.frames_to_video(masked, out_path, fps=fps)
+
+
 @app.command()
 def annotate_video_file(
     video_path: str,
@@ -414,6 +508,45 @@ def crop_video_file(
         frame_key=frame_key,
         mode=mode,
         padding=padding,
+        gap_behavior=gap_behavior,
+    )
+
+
+@app.command()
+def mask_video_file(
+    video_path: str,
+    json_path: str,
+    out_path: str,
+    mask_key: str = "mask_b64",
+    frame_key: str = "frame",
+    bg_color: str = "#000000",
+    gap_behavior: str = "skip",
+) -> str:
+    """Mask ``video_path`` per-frame using masks from a JSON file; save to ``out_path``.
+
+    ``json_path`` holds a JSON list of detection dicts — one mask per frame (see
+    :func:`mask_video`; any bounding boxes are ignored). Each frame's masked foreground is kept
+    over the ``bg_color`` background.
+
+    Args:
+        video_path: Path to the input video.
+        json_path: Path to the detections JSON (a flat list of per-frame mask dicts).
+        out_path: Destination path for the masked video.
+        mask_key: Object key holding the base64-encoded PNG mask.
+        frame_key: Object key holding the 0-based frame index.
+        bg_color: Background color as a CSS string (e.g. "#000000") behind the mask and for fill.
+        gap_behavior: For frames with no mask — "skip" (drop them) or "fill" (paint the whole
+            frame with bg_color).
+    """
+    with open(json_path) as f:
+        detections = json.load(f)
+    return mask_video(
+        video_path,
+        detections,
+        out_path,
+        mask_key=mask_key,
+        frame_key=frame_key,
+        bg_rgb_tup=ImageColor.getrgb(bg_color),
         gap_behavior=gap_behavior,
     )
 

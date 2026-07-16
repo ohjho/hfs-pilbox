@@ -86,20 +86,27 @@ commit the JSON.
     `gr.ColorPicker` background color (default black `#000000`); output is the foreground cut
     out over that solid background. The color picker is a `string` in the API/MCP schema
     (a CSS color); `_rgb_from_css` converts `#rrggbb`/`rgba(...)` to an RGB tuple.
+  - **Mask Video** tab: `mask_video(...)` → `vidbox.mask_video` (`api_name="mask_video"`).
+    Inputs are a `gr.Video`, a masks JSON `gr.File`, a `mask_key` textbox (default `"mask_b64"`),
+    a `gr.ColorPicker` background color, and a `gr.Dropdown` gap behavior
+    (`vidbox.MASK_GAP_BEHAVIORS` = `skip`/`fill`, default `skip`). Output is a video with each
+    frame's masked foreground kept over the background color; **boxes in the JSON are ignored**,
+    one mask per frame. Color conversion via `_rgb_from_css`, as the image Mask tab.
 - Demo examples are loaded from `assets/` at import, each guarded so a missing asset doesn't
   crash startup: `_load_example()` (image + JSON), `_example_mask()` (first object's
   `b64_mask` for the Mask tab), `_load_video_example()` (the SAM2 video + `*-with_mask.json`
-  for Annotate Video), and `_load_crop_video_example()` (the video + `*-VideoCrop-example.json`
-  for Crop Video). All assets are git-ignored, so on the Space the examples are simply absent.
+  for Annotate Video), `_load_crop_video_example()` (the video + `*-VideoCrop-example.json` for
+  Crop Video), and `_load_mask_video_example()` (the video + `*-player1box.json` for Mask
+  Video). All assets are git-ignored, so on the Space the examples are simply absent.
 - Bad JSON, invalid crop boxes, undecodable/mismatched masks, unknown bbox formats, and
-  conflicting per-frame crop boxes are surfaced as a `gr.Error` (`pilbox.crop` /
-  `pilbox.apply_mask` / `vidbox.annotate_video` / `vidbox.crop_video` raise `ValueError`,
-  re-raised as `gr.Error`).
+  conflicting per-frame crop boxes / masks are surfaced as a `gr.Error` (`pilbox.crop` /
+  `pilbox.apply_mask` / `vidbox.annotate_video` / `vidbox.crop_video` / `vidbox.mask_video`
+  raise `ValueError`, re-raised as `gr.Error`).
 - Launched under `if __name__ == "__main__"` with `mcp_server=True` and `docs_url="/docs"`
   (MCP server + FastAPI Swagger docs); each tab's endpoint (`annotate`, `annotate_video`,
-  `crop`, `crop_video`, `mask`) is exposed as its own MCP tool. MCP tool name = the Python
-  function name (`annotate_image` / `annotate_video` / `crop_image` / `crop_video` /
-  `mask_image`), not `api_name`.
+  `crop`, `crop_video`, `mask`, `mask_video`) is exposed as its own MCP tool. MCP tool name =
+  the Python function name (`annotate_image` / `annotate_video` / `crop_image` / `crop_video` /
+  `mask_image` / `mask_video`), not `api_name`.
 
 ## Bounding-box conventions (boxer.py)
 
@@ -216,11 +223,11 @@ uv run python ffmpret.py extract-audio clip.mp4 --output-dir audio/ --lossless #
 ```
 
 
-## vidbox.py — video annotation + crop (ties ffmpret + boxer + pilbox)
+## vidbox.py — video annotation + crop + mask (ties ffmpret + boxer + pilbox)
 
-The video counterparts of `pilbox.annotate` / `pilbox.crop`; back the app's **Annotate Video**
-and **Crop Video** tabs and add no new deps (it imports the three existing modules). Keeps
-`pilbox` lite by living in its own module.
+The video counterparts of `pilbox.annotate` / `pilbox.crop` / `pilbox.apply_mask`; back the
+app's **Annotate Video** / **Crop Video** / **Mask Video** tabs and add no new deps (it imports
+the three existing modules). Keeps `pilbox` lite by living in its own module.
 
 - `annotate_video(video_path, detections, out_path, *, bbox_format="coco_normalized",
   coord_keys=("x","y","w","h"), frame_key="frame", label_key="track_id",
@@ -247,12 +254,21 @@ and **Crop Video** tabs and add no new deps (it imports the three existing modul
   for frames with no box (`jump` = centered window / black frame; `carry_forward` = repeat the
   previous output). Reuses `ffmpret.extract_frames(fps=None)` + `frames_to_video`, `pilbox.crop`
   + `letterbox`; module helpers `_even` / `_pad_clamp_box` / `_crop_window` / `_gap_frame`.
-- CLIs `annotate_video_file` / `crop_video_file` (comma-separated `--coord-keys`); a
-  `@app.callback()` keeps the subcommand names (Typer otherwise collapses a lone command).
+- `mask_video(video_path, detections, out_path, *, mask_key="mask_b64", frame_key="frame",
+  bg_rgb_tup=(0,0,0), gap_behavior="skip") -> out_path` keeps each frame's masked foreground
+  over a solid background color (per-frame `pilbox.apply_mask`). **Boxes are ignored** (masks
+  only), one mask per frame (exact-duplicate rows dedupe, two *different* masks on a frame raise
+  `ValueError`, validated before ffmpeg). `gap_behavior` ∈ `MASK_GAP_BEHAVIORS`: `skip` drops
+  frames with no mask (shorter, jump-cut output) or `fill` paints them entirely with
+  `bg_rgb_tup`. Output keeps source resolution/fps.
+- CLIs `annotate_video_file` / `crop_video_file` / `mask_video_file` (comma-separated
+  `--coord-keys`; `--bg-color` is a CSS string via `PIL.ImageColor.getrgb`); a `@app.callback()`
+  keeps the subcommand names (Typer otherwise collapses a lone command).
 
 ```bash
 uv run python vidbox.py annotate-video-file in.mp4 dets.json out.mp4 --bbox-format coco_normalized
 uv run python vidbox.py crop-video-file in.mp4 dets.json out.mp4 --mode window   # or --mode box_fit
+uv run python vidbox.py mask-video-file in.mp4 masks.json out.mp4 --gap-behavior skip  # or fill
 ```
 
 
