@@ -81,6 +81,23 @@ def _load_video_example():
 EXAMPLE_VIDEO, EXAMPLE_VIDEO_JSON = _load_video_example()
 
 
+def _load_crop_video_example():
+    """Return ``(video_path, detections_json_path)`` for the Crop Video demo example.
+
+    Both assets are git-ignored/not deployed, so both are optional; returns
+    ``(None, None)`` when either is absent.
+    """
+    video_path = ASSETS / "17078229_3222904.mp4"
+    json_path = ASSETS / "17078229_3222904-VideoCrop-example.json"
+    if not (video_path.exists() and json_path.exists()):
+        logger.info("crop-video example assets not found in {}; running without one", ASSETS)
+        return None, None
+    return str(video_path), str(json_path)
+
+
+EXAMPLE_CROP_VIDEO, EXAMPLE_CROP_JSON = _load_crop_video_example()
+
+
 def annotate_image(
     image, boxes_json, label_key, color_key, mask_key, mask_alpha, width, font_size
 ):
@@ -253,6 +270,60 @@ def annotate_video(
         raise gr.Error(str(e))
 
 
+def crop_video(video_path, boxes_json_file, bbox_format, coord_keys, mode, padding, gap_behavior) -> str:
+    """Crop a video to a subject that moves frame-to-frame, using a per-frame box JSON, and return the cropped video.
+
+    Takes a video plus a detections JSON file — a flat JSON list of per-frame detection objects, each with a
+    0-based frame index under the "frame" key and box coordinates under the four keys named by coord_keys
+    (default "x,y,w,h", read in that order). Any mask fields are IGNORED; only the boxes are used. Each frame
+    must carry at most one box — exact-duplicate rows collapse to one, but a frame holding two DIFFERENT boxes
+    is an error. Because a video needs a constant frame size, the output size is the per-axis maximum box size
+    (times padding, rounded to even, clamped to the frame) and every frame is cropped to that fixed size. With
+    mode "window" a fixed window is cropped from the original frame and re-centered on each frame's box, so the
+    subject is shown with its surrounding scene and the window pans to follow it; with mode "box_fit" each
+    frame is cropped exactly to its box, black-padded to the output aspect ratio (no stretching), and resized
+    to fill, so only the subject is shown. Frames with no detection are gaps: with "jump" the window centers on
+    the frame (window mode) or a black frame is emitted (box_fit); with "carry_forward" the previous output
+    frame is repeated. The box coordinates are interpreted per bbox_format, one of: "pascal_voc" =
+    [x0, y0, x1, y1] absolute pixels; "albumentations" = [x0, y0, x1, y1] normalized 0-1; "coco" =
+    [x0, y0, width, height] absolute pixels; "coco_normalized" = [x0, y0, width, height] normalized 0-1 — as
+    documented at https://albumentations.ai/docs/3-basic-usage/bounding-boxes-augmentations/#bounding-box-formats .
+
+    Args:
+        video_path: The input video file to crop.
+        boxes_json_file: A .json file holding a flat list of per-frame detection objects (see above); masks ignored.
+        bbox_format: Box coordinate convention: one of "pascal_voc", "albumentations", "coco", or "coco_normalized".
+        coord_keys: Comma-separated names of the four object keys holding the box values, in order (default "x,y,w,h").
+        mode: "window" (crop a panning window from the frame, keeping surrounding scene) or "box_fit" (crop to the box, letterbox, resize to fill — subject only).
+        padding: Multiplier that expands each box about its center before sizing and cropping (1.0 = no expansion).
+        gap_behavior: For frames with no detection: "jump" (center the window / emit a black frame) or "carry_forward" (repeat the previous output frame).
+    """
+    if video_path is None:
+        raise gr.Error("Please provide an input video.")
+    if not boxes_json_file:
+        raise gr.Error("Please provide a detections JSON file.")
+    try:
+        with open(boxes_json_file) as f:
+            detections = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        raise gr.Error(f"Could not read detections JSON: {e}")
+
+    out_path = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False).name
+    try:
+        return vidbox.crop_video(
+            video_path,
+            detections,
+            out_path,
+            bbox_format=bbox_format,
+            coord_keys=tuple(k.strip() for k in coord_keys.split(",")),
+            mode=mode,
+            padding=float(padding),
+            gap_behavior=gap_behavior,
+        )
+    except (ValueError, KeyError) as e:
+        raise gr.Error(str(e))
+
+
 annotate_interface = gr.Interface(
     fn=annotate_image,
     inputs=[
@@ -340,6 +411,48 @@ crop_interface = gr.Interface(
     api_name="crop",
 )
 
+crop_video_interface = gr.Interface(
+    fn=crop_video,
+    inputs=[
+        gr.Video(label="Input Video"),
+        gr.File(label="Detections JSON", file_types=[".json"], type="filepath"),
+        gr.Dropdown(
+            choices=list(boxer.BBOX_FORMATS),
+            value="coco_normalized",
+            label="Box format",
+        ),
+        gr.Textbox(value="x,y,w,h", label="Coordinate keys (comma-separated)"),
+        gr.Dropdown(
+            choices=list(vidbox.CROP_MODES), value="window", label="Crop mode"
+        ),
+        gr.Slider(1.0, 2.0, value=1.0, step=0.05, label="Padding (box expand factor)"),
+        gr.Dropdown(
+            choices=list(vidbox.GAP_BEHAVIORS),
+            value="jump",
+            label="Gap behavior (frames with no detection)",
+        ),
+    ],
+    outputs=gr.Video(label="Cropped Video"),
+    examples=(
+        [
+            [
+                EXAMPLE_CROP_VIDEO,
+                EXAMPLE_CROP_JSON,
+                "coco_normalized",
+                "x,y,w,h",
+                "window",
+                1.0,
+                "jump",
+            ]
+        ]
+        if EXAMPLE_CROP_VIDEO and EXAMPLE_CROP_JSON
+        else None
+    ),
+    title="PILBox — Video Cropper",
+    description="Crop a video to a moving subject via a per-frame box JSON (tracking window; masks ignored).",
+    api_name="crop_video",
+)
+
 mask_interface = gr.Interface(
     fn=mask_image,
     inputs=[
@@ -359,8 +472,14 @@ mask_interface = gr.Interface(
 )
 
 app = gr.TabbedInterface(
-    [annotate_interface, annotate_video_interface, crop_interface, mask_interface],
-    ["Annotate", "Annotate Video", "Crop", "Mask"],
+    [
+        annotate_interface,
+        annotate_video_interface,
+        crop_interface,
+        crop_video_interface,
+        mask_interface,
+    ],
+    ["Annotate", "Annotate Video", "Crop", "Crop Video", "Mask"],
     title="PILBox",
 )
 

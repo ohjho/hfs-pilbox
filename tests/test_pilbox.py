@@ -102,6 +102,28 @@ def test_annotate_custom_keys():
     assert out.size == (100, 100)
 
 
+def test_letterbox_size_aspect_and_bars():
+    # a 100x50 (2:1) image fit into an 80x80 (1:1) canvas -> letterboxed
+    im = Image.new("RGB", (100, 50), (255, 255, 255))
+    out = pilbox.letterbox(im, 80, 80)
+
+    assert isinstance(out, Image.Image)
+    assert out.size == (80, 80)  # exact target size
+    # width fills (80), height scales to 40 -> 20px black bars top and bottom
+    assert out.getpixel((40, 2)) == (0, 0, 0)  # top bar black
+    assert out.getpixel((40, 78)) == (0, 0, 0)  # bottom bar black
+    assert out.getpixel((40, 40)) == (255, 255, 255)  # center holds the image
+
+
+def test_letterbox_pillarbox_and_custom_fill():
+    # a 50x100 (tall) image into 80x80 -> pillarbox (side bars); custom fill color
+    im = Image.new("RGB", (50, 100), (255, 255, 255))
+    out = pilbox.letterbox(im, 80, 80, fill=(0, 0, 255))
+    assert out.size == (80, 80)
+    assert out.getpixel((2, 40)) == (0, 0, 255)  # left bar is the fill color
+    assert out.getpixel((40, 40)) == (255, 255, 255)  # center holds the image
+
+
 def test_crop_returns_expected_region():
     im = Image.new("RGB", (100, 100), "white")
     # paint a red patch so we can confirm the crop grabs the right pixels

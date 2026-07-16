@@ -75,6 +75,12 @@ commit the JSON.
   - **Crop** tab: `crop_image(...)` → `pilbox.crop` (`api_name="crop"`). Inputs are an image
     plus manual `gr.Number` fields `x0/y0/x1/y1` (pascal_voc box); output is the cropped
     region.
+  - **Crop Video** tab: `crop_video(...)` → `vidbox.crop_video` (`api_name="crop_video"`).
+    Inputs are a `gr.Video`, a detections JSON `gr.File`, the `boxer.BBOX_FORMATS` dropdown +
+    `coord_keys`, a `gr.Dropdown` mode (`vidbox.CROP_MODES` = `window`/`box_fit`, default
+    `window`), a padding slider (1.0–2.0), and a gap-behavior dropdown (`vidbox.GAP_BEHAVIORS`
+    = `jump`/`carry_forward`, default `jump`). Output is a cropped video that follows the
+    subject; **masks in the JSON are ignored** — only boxes are used, one per frame.
   - **Mask** tab: `mask_image(...)` → `pilbox.apply_mask` (`api_name="mask"`). Inputs are an
     image, a base64-encoded PNG mask (paste-in `gr.Textbox`, same size as the image), and a
     `gr.ColorPicker` background color (default black `#000000`); output is the foreground cut
@@ -82,16 +88,18 @@ commit the JSON.
     (a CSS color); `_rgb_from_css` converts `#rrggbb`/`rgba(...)` to an RGB tuple.
 - Demo examples are loaded from `assets/` at import, each guarded so a missing asset doesn't
   crash startup: `_load_example()` (image + JSON), `_example_mask()` (first object's
-  `b64_mask` for the Mask tab), and `_load_video_example()` (the SAM2 video +
-  `*-with_mask.json` for the Annotate Video tab). All assets are git-ignored, so on the Space
-  the examples are simply absent.
-- Bad JSON, invalid crop boxes, undecodable/mismatched masks, and unknown bbox formats are
-  surfaced as a `gr.Error` (`pilbox.crop` / `pilbox.apply_mask` / `vidbox.annotate_video`
-  raise `ValueError`, re-raised as `gr.Error`).
+  `b64_mask` for the Mask tab), `_load_video_example()` (the SAM2 video + `*-with_mask.json`
+  for Annotate Video), and `_load_crop_video_example()` (the video + `*-VideoCrop-example.json`
+  for Crop Video). All assets are git-ignored, so on the Space the examples are simply absent.
+- Bad JSON, invalid crop boxes, undecodable/mismatched masks, unknown bbox formats, and
+  conflicting per-frame crop boxes are surfaced as a `gr.Error` (`pilbox.crop` /
+  `pilbox.apply_mask` / `vidbox.annotate_video` / `vidbox.crop_video` raise `ValueError`,
+  re-raised as `gr.Error`).
 - Launched under `if __name__ == "__main__"` with `mcp_server=True` and `docs_url="/docs"`
   (MCP server + FastAPI Swagger docs); each tab's endpoint (`annotate`, `annotate_video`,
-  `crop`, `mask`) is exposed as its own MCP tool. MCP tool name = the Python function name
-  (`annotate_image` / `annotate_video` / `crop_image` / `mask_image`), not `api_name`.
+  `crop`, `crop_video`, `mask`) is exposed as its own MCP tool. MCP tool name = the Python
+  function name (`annotate_image` / `annotate_video` / `crop_image` / `crop_video` /
+  `mask_image`), not `api_name`.
 
 ## Bounding-box conventions (boxer.py)
 
@@ -147,6 +155,9 @@ dict `{x0, y0, x1, y1}` of absolute top-left / bottom-right pixels (matching the
   it validates the pascal_voc box (raises `ValueError` if empty/inverted or out of bounds),
   converts to RGB, and returns a new image (never mutates the input). Used by `app.py`'s Crop
   tab.
+- `letterbox(image, w, h, fill=(0,0,0)) -> Image.Image` scales `image` to fit inside `w`×`h`
+  preserving aspect and pastes it centered on a solid `fill` canvas (black bars, no stretch).
+  Backs `vidbox.crop_video`'s `box_fit` mode.
 - `im_crop`, `im_center_crop`, `im_draw_point`, `load_pil_font` are retained helpers.
 
 CLI: `annotate_cli.py` (typer + loguru, run separately so `import pilbox` stays lite):
@@ -205,11 +216,11 @@ uv run python ffmpret.py extract-audio clip.mp4 --output-dir audio/ --lossless #
 ```
 
 
-## vidbox.py — video annotation (ties ffmpret + boxer + pilbox)
+## vidbox.py — video annotation + crop (ties ffmpret + boxer + pilbox)
 
-The video counterpart of `pilbox.annotate`; backs the app's **Annotate Video** tab and adds
-no new deps (it imports the three existing modules). Keeps `pilbox` lite by living in its own
-module.
+The video counterparts of `pilbox.annotate` / `pilbox.crop`; back the app's **Annotate Video**
+and **Crop Video** tabs and add no new deps (it imports the three existing modules). Keeps
+`pilbox` lite by living in its own module.
 
 - `annotate_video(video_path, detections, out_path, *, bbox_format="coco_normalized",
   coord_keys=("x","y","w","h"), frame_key="frame", label_key="track_id",
@@ -224,12 +235,24 @@ module.
   annotation is at **native resolution** (no downscale) to keep them aligned. Detections whose
   frame index exceeds the decoded frame count are warned + skipped. Raises `ValueError` on an
   unknown `bbox_format` or zero decoded frames.
-- CLI `annotate_video_file` (comma-separated `--coord-keys`); a `@app.callback()` keeps the
-  subcommand name (Typer otherwise collapses a lone command).
+- `crop_video(video_path, detections, out_path, *, bbox_format="coco_normalized",
+  coord_keys=("x","y","w","h"), frame_key="frame", mode="window", padding=1.0,
+  gap_behavior="jump") -> out_path` crops a video to a subject that moves frame-to-frame.
+  **Masks are ignored** (boxes only), and each frame must have **at most one** box: exact-
+  duplicate rows dedupe, but two *different* boxes on a frame raise `ValueError` (validated
+  before ffmpeg runs). Output size = per-axis max box (× `padding`, `_even`, clamped to the
+  frame); constant across frames so it encodes. `mode` ∈ `CROP_MODES` (`window` = a fixed
+  window cropped from the frame, re-centered on each box, keeps scene, pans; `box_fit` = crop
+  to the box then `pilbox.letterbox` to fill, subject only). `gap_behavior` ∈ `GAP_BEHAVIORS`
+  for frames with no box (`jump` = centered window / black frame; `carry_forward` = repeat the
+  previous output). Reuses `ffmpret.extract_frames(fps=None)` + `frames_to_video`, `pilbox.crop`
+  + `letterbox`; module helpers `_even` / `_pad_clamp_box` / `_crop_window` / `_gap_frame`.
+- CLIs `annotate_video_file` / `crop_video_file` (comma-separated `--coord-keys`); a
+  `@app.callback()` keeps the subcommand names (Typer otherwise collapses a lone command).
 
 ```bash
-uv run python vidbox.py annotate-video-file in.mp4 dets.json out.mp4 \
-    --bbox-format coco_normalized
+uv run python vidbox.py annotate-video-file in.mp4 dets.json out.mp4 --bbox-format coco_normalized
+uv run python vidbox.py crop-video-file in.mp4 dets.json out.mp4 --mode window   # or --mode box_fit
 ```
 
 

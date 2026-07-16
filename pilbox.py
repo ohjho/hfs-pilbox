@@ -68,6 +68,42 @@ def crop(image: Image.Image, x0, y0, x1, y1) -> Image.Image:
     return Image.fromarray(cropped)
 
 
+def letterbox(image: Image.Image, w: int, h: int, fill=(0, 0, 0)) -> Image.Image:
+    """Fit ``image`` into a ``w`` x ``h`` canvas, preserving aspect ratio.
+
+    The image is scaled to fit fully inside ``w`` x ``h`` (whichever axis is
+    tighter) and pasted centered onto a solid ``fill`` canvas of exactly that
+    size, so no content is stretched. The unused strip becomes black bars —
+    pillarbox (left/right) when the image is relatively tall, letterbox
+    (top/bottom) when it is relatively wide.
+
+    Args:
+        image: Source ``PIL.Image.Image`` (never mutated; a new image is returned).
+        w: Target canvas width in pixels.
+        h: Target canvas height in pixels.
+        fill: Canvas/bar color as an ``(r, g, b)`` tuple (default black).
+
+    Returns:
+        A new ``w`` x ``h`` ``PIL.Image.Image`` with the fitted image centered.
+
+    >>> im = Image.new("RGB", (100, 50), "white")  # 2:1, wider than 1:1 target
+    >>> out = letterbox(im, 80, 80)
+    >>> out.size
+    (80, 80)
+    >>> out.getpixel((40, 0))  # top bar is black (image is letterboxed)
+    (0, 0, 0)
+    >>> out.getpixel((40, 40))  # center holds the (white) image
+    (255, 255, 255)
+    """
+    iw, ih = image.size
+    scale = min(w / iw, h / ih)
+    new_w, new_h = max(1, round(iw * scale)), max(1, round(ih * scale))
+    resized = image.convert("RGB").resize((new_w, new_h))
+    canvas = Image.new("RGB", (w, h), tuple(fill))
+    canvas.paste(resized, ((w - new_w) // 2, (h - new_h) // 2))
+    return canvas
+
+
 def im_center_crop(im_rgb_array, w, h):
     """Center-crop an RGB numpy image to width ``w`` and height ``h``."""
     h_, w_, _ = im_rgb_array.shape
