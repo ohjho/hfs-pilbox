@@ -90,7 +90,9 @@ def _load_crop_video_example():
     video_path = ASSETS / "17078229_3222904.mp4"
     json_path = ASSETS / "17078229_3222904-VideoCrop-example.json"
     if not (video_path.exists() and json_path.exists()):
-        logger.info("crop-video example assets not found in {}; running without one", ASSETS)
+        logger.info(
+            "crop-video example assets not found in {}; running without one", ASSETS
+        )
         return None, None
     return str(video_path), str(json_path)
 
@@ -270,7 +272,9 @@ def annotate_video(
         raise gr.Error(str(e))
 
 
-def crop_video(video_path, boxes_json_file, bbox_format, coord_keys, mode, padding, gap_behavior) -> str:
+def crop_video(
+    video_path, boxes_json_file, bbox_format, coord_keys, mode, padding, gap_behavior
+) -> str:
     """Crop a video to a subject that moves frame-to-frame, using a per-frame box JSON, and return the cropped video.
 
     Takes a video plus a detections JSON file — a flat JSON list of per-frame detection objects, each with a
@@ -342,7 +346,18 @@ annotate_interface = gr.Interface(
     ],
     outputs=gr.Image(type="pil", label="Annotated Image"),
     examples=(
-        [[EXAMPLE_IMAGE, EXAMPLE_JSON, "object_id", "object_id", "b64_mask", 0.5, 3, 20]]
+        [
+            [
+                EXAMPLE_IMAGE,
+                EXAMPLE_JSON,
+                "object_id",
+                "object_id",
+                "b64_mask",
+                0.5,
+                3,
+                20,
+            ]
+        ]
         if EXAMPLE_IMAGE
         else None
     ),
@@ -403,9 +418,7 @@ crop_interface = gr.Interface(
         gr.Number(value=100, precision=0, label="y1 (bottom)"),
     ],
     outputs=gr.Image(type="pil", label="Cropped Image"),
-    examples=(
-        [[EXAMPLE_IMAGE, 0, 0, 100, 100]] if EXAMPLE_IMAGE else None
-    ),
+    examples=([[EXAMPLE_IMAGE, 0, 0, 100, 100]] if EXAMPLE_IMAGE else None),
     title="PILBox — Image Cropper",
     description="Crop an image to a pascal_voc box (x0, y0, x1, y1) using numpy + Pillow.",
     api_name="crop",
@@ -423,7 +436,7 @@ crop_video_interface = gr.Interface(
         ),
         gr.Textbox(value="x,y,w,h", label="Coordinate keys (comma-separated)"),
         gr.Dropdown(
-            choices=list(vidbox.CROP_MODES), value="window", label="Crop mode"
+            choices=list(vidbox.CROP_MODES), value="box_fit", label="Crop mode"
         ),
         gr.Slider(1.0, 2.0, value=1.0, step=0.05, label="Padding (box expand factor)"),
         gr.Dropdown(
