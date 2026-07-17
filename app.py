@@ -120,24 +120,35 @@ EXAMPLE_MASK_VIDEO, EXAMPLE_MASK_JSON = _load_mask_video_example()
 
 
 def annotate_image(
-    image, boxes_json, label_key, color_key, mask_key, mask_alpha, width, font_size
+    image,
+    boxes_json,
+    bbox_format,
+    label_key,
+    color_key,
+    mask_key,
+    mask_alpha,
+    width,
+    font_size,
 ):
-    """Draw pascal_voc bounding boxes (and optional segmentation masks) onto an image and return the annotated image.
+    """Draw bounding boxes (and optional segmentation masks) onto an image and return the annotated image.
 
-    boxes_json is a JSON list of object dicts. Each object holds its box under a "boundingBox"
-    key as {"x0", "y0", "x1", "y1"}: (x0, y0) is the top-left corner and (x1, y1) is the
-    bottom-right corner, in absolute pixels of the input image (the "pascal_voc" format,
-    documented at
-    https://albumentations.ai/docs/3-basic-usage/bounding-boxes-augmentations/#bounding-box-formats ).
-    NOT normalized to 0-1 and NOT [x, y, width, height]. Each object may also carry the label_key
-    and color_key fields, plus a mask_key field holding a base64-encoded PNG mask. When an object
-    has a mask, it is drawn as a translucent colored overlay beneath the box, using the SAME color
-    as that object's box (both derived from color_key). The output is the input image with every
-    mask and box drawn on it.
+    boxes_json is a JSON list of object dicts. Each object holds its box under a "boundingBox" key
+    as either {"x0", "y0", "x1", "y1"} or a list of four numbers; the four values are read in that
+    order (x0, y0, x1, y1 slots) and interpreted according to bbox_format, one of: "pascal_voc" =
+    [x0, y0, x1, y1] absolute pixels; "albumentations" = [x0, y0, x1, y1] normalized 0-1; "coco" =
+    [x0, y0, width, height] absolute pixels; "coco_normalized" = [x0, y0, width, height] normalized
+    0-1 — as documented at
+    https://albumentations.ai/docs/3-basic-usage/bounding-boxes-augmentations/#bounding-box-formats .
+    Whatever the input format, boxes are converted to pascal_voc absolute pixels before drawing. Each
+    object may also carry the label_key and color_key fields, plus a mask_key field holding a
+    base64-encoded PNG mask. When an object has a mask, it is drawn as a translucent colored overlay
+    beneath the box, using the SAME color as that object's box (both derived from color_key). The
+    output is the input image with every mask and box drawn on it.
 
     Args:
         image: The RGB image to annotate.
-        boxes_json: JSON text — a list of object dicts, each with a "boundingBox" {x0, y0, x1, y1} and optional label/color/mask fields.
+        boxes_json: JSON text — a list of object dicts, each with a "boundingBox" (a {x0, y0, x1, y1} dict or a 4-number list, read in that order) and optional label/color/mask fields.
+        bbox_format: Box coordinate convention for the four boundingBox values: one of "pascal_voc", "albumentations", "coco", or "coco_normalized".
         label_key: Name of the object field whose value is drawn as each box's text label.
         color_key: Name of the object field used to color-group boxes and masks (each distinct value gets its own color).
         mask_key: Name of the object field holding a base64-encoded PNG mask; leave empty to disable mask drawing.
@@ -152,10 +163,26 @@ def annotate_image(
     except json.JSONDecodeError as e:
         raise gr.Error(f"Invalid JSON: {e}")
 
+    im_w, im_h = image.size
+    try:
+        converted = []
+        for obj in objects:
+            box = obj["boundingBox"]
+            coords = (
+                box[:4]
+                if isinstance(box, (list, tuple))
+                else (box["x0"], box["y0"], box["x1"], box["y1"])
+            )
+            converted.append(
+                {**obj, "boundingBox": boxer.to_pascal_voc(coords, bbox_format, im_w, im_h)}
+            )
+    except (ValueError, KeyError, TypeError) as e:
+        raise gr.Error(f"Could not read boxes: {e}")
+
     font = pilbox.load_pil_font(size=int(font_size))
     return pilbox.annotate(
         image,
-        objects,
+        converted,
         label_key=label_key,
         color_key=color_key,
         mask_key=mask_key,
@@ -398,8 +425,13 @@ annotate_interface = gr.Interface(
         gr.Image(type="pil", label="Input Image"),
         gr.Code(
             language="json",
-            label="Bounding Boxes (pascal_voc JSON)",
+            label="Bounding Boxes (JSON)",
             value=EXAMPLE_JSON,
+        ),
+        gr.Dropdown(
+            choices=list(boxer.BBOX_FORMATS),
+            value="pascal_voc",
+            label="Box format",
         ),
         gr.Textbox(value="object_id", label="Label key"),
         gr.Textbox(value="object_id", label="Color key"),
@@ -414,6 +446,7 @@ annotate_interface = gr.Interface(
             [
                 EXAMPLE_IMAGE,
                 EXAMPLE_JSON,
+                "pascal_voc",
                 "object_id",
                 "object_id",
                 "b64_mask",
@@ -426,7 +459,7 @@ annotate_interface = gr.Interface(
         else None
     ),
     title="PILBox — Bounding Box Annotator",
-    description="Draw pascal_voc bounding boxes on an image using numpy + Pillow.",
+    description="Draw bounding boxes on an image (pascal_voc / albumentations / coco / coco_normalized) using numpy + Pillow.",
     api_name="annotate",
 )
 

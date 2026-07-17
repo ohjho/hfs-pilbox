@@ -59,11 +59,16 @@ commit the JSON.
 - A `gr.TabbedInterface` combining four `gr.Interface`s — no image/video logic lives in
   `app.py`; each callback delegates to `pilbox` / `vidbox`.
   - **Annotate** tab: `annotate_image(...)` → `pilbox.annotate` (`api_name="annotate"`).
-    Inputs mirror the CLI options: image, pascal_voc JSON (paste-in `gr.Code`), `label_key`,
-    `color_key`, `mask_key`, `mask_alpha`, `width`, `font_size`; output is the annotated image.
-    When an object carries a base64-PNG mask under `mask_key` (default `"b64_mask"`), it is
-    overlaid as a translucent mask **beneath** the box, colored to match that object's box
-    (same `color_key` value → same color). Clearing the `Mask key` field disables masks.
+    Inputs: image, boxes JSON (paste-in `gr.Code`), a `gr.Dropdown` of the four
+    `boxer.BBOX_FORMATS` (default `pascal_voc`), then `label_key`, `color_key`, `mask_key`,
+    `mask_alpha`, `width`, `font_size`; output is the annotated image. Each object still holds
+    its box under `"boundingBox"` (a `{x0,y0,x1,y1}` dict or a 4-number list); the four values
+    are read in order and reinterpreted per the `bbox_format` dropdown, converted to pascal_voc
+    via `boxer.to_pascal_voc` in `app.py` before `pilbox.annotate` (so `pilbox` stays lite —
+    `pascal_voc` is the identity conversion). When an object carries a base64-PNG mask under
+    `mask_key` (default `"b64_mask"`), it is overlaid as a translucent mask **beneath** the box,
+    colored to match that object's box (same `color_key` value → same color). Clearing the
+    `Mask key` field disables masks.
   - **Annotate Video** tab: `annotate_video(...)` → `vidbox.annotate_video`
     (`api_name="annotate_video"`). Inputs are a `gr.Video`, a detections JSON **file upload**
     (`gr.File` — the mask JSON is large, so not a paste-in `gr.Code`), a `gr.Dropdown` of the
