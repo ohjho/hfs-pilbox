@@ -26,7 +26,7 @@ from collections import defaultdict
 import typer
 from loguru import logger
 from PIL import Image, ImageColor
-from typing import Literal
+from typing import Literal, Optional
 
 import boxer
 import ffmpret
@@ -63,12 +63,17 @@ def annotate_video(
     mask_alpha: float = 0.5,
     width: int = 3,
     font_size: int = 20,
+    text_overlay: Optional[str] = None,
+    text_font_size: int = 20,
+    text_y_position: str = "bottom",
 ) -> str:
     """Draw per-frame boxes and masks over a video and write the annotated result.
 
     Frames are extracted at native fps/resolution (so frame index ``i`` matches a
     detection's ``frame_key`` value, and full-frame masks line up), annotated with
     :func:`pilbox.annotate`, then re-encoded to a silent video at the source fps.
+    An optional ``text_overlay`` label is burned in at extraction time, so it
+    renders beneath the box/mask annotations.
 
     Args:
         video_path: Path to the input video.
@@ -86,7 +91,15 @@ def annotate_video(
             pass ``""`` to disable masks.
         mask_alpha: Mask overlay opacity in ``[0, 1]``.
         width: Box outline width in pixels.
-        font_size: Label font size in points.
+        font_size: Label font size in points (the pilbox box-label font).
+        text_overlay: Optional literal text burned into every frame (beneath
+            the annotations); ``None``/empty disables it.
+        text_font_size: Font size of the ``text_overlay`` (the ffmpeg drawtext
+            font, distinct from ``font_size``). Only used when ``text_overlay``
+            is set.
+        text_y_position: Vertical placement of the ``text_overlay``; one of
+            :data:`ffmpret.TEXT_Y_POSITIONS` (``top``/``middle``/``bottom``).
+            Only used when ``text_overlay`` is set.
 
     Returns:
         ``out_path``.
@@ -103,7 +116,14 @@ def annotate_video(
     org_w, org_h, fps = vmeta["width"], vmeta["height"], vmeta["fps"]
 
     # Extract every native frame so frame indices align with the detections.
-    frames = ffmpret.extract_frames(video_path, fps=None, write_timestamp=False)
+    frames = ffmpret.extract_frames(
+        video_path,
+        fps=None,
+        write_timestamp=False,
+        text_overlay=text_overlay,
+        text_font_size=text_font_size,
+        text_y_position=text_y_position,
+    )
     if not frames:
         raise ValueError(f"no frames decoded from {video_path}")
 
@@ -437,6 +457,9 @@ def annotate_video_file(
     mask_alpha: float = 0.5,
     width: int = 3,
     font_size: int = 20,
+    text_overlay: Optional[str] = None,
+    text_font_size: int = 20,
+    text_y_position: str = "bottom",
 ) -> str:
     """Annotate ``video_path`` using detections from a JSON file; save to ``out_path``.
 
@@ -458,6 +481,9 @@ def annotate_video_file(
         mask_alpha=mask_alpha,
         width=width,
         font_size=font_size,
+        text_overlay=text_overlay,
+        text_font_size=text_font_size,
+        text_y_position=text_y_position,
     )
 
 

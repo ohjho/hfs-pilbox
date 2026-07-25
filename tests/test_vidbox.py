@@ -88,6 +88,24 @@ def test_annotate_video_synthetic_coco_normalized(tiny_video, tmp_path):
     assert 8 <= int(meta["nb_frames"]) <= 12
 
 
+def test_annotate_video_with_text_overlay(tiny_video, tmp_path):
+    # the overlay params pass through to ffmpret.extract_frames (drawtext via
+    # textfile); output must still encode at source dims/frames.
+    detections = [
+        {"frame": 0, "track_id": 0, "x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3},
+    ]
+    out = tmp_path / "overlaid.mp4"
+    result = vidbox.annotate_video(
+        tiny_video, detections, str(out), bbox_format="coco_normalized",
+        mask_key="",
+        text_overlay="cam-1", text_font_size=12, text_y_position="top",
+    )
+    assert Path(result).is_file()
+    meta = _probe(result)
+    assert meta["width"] == "64" and meta["height"] == "48"
+    assert 8 <= int(meta["nb_frames"]) <= 12
+
+
 def test_crop_video_rejects_conflicting_boxes():
     # same frame, two DIFFERENT boxes -> conflict error (needs no ffmpeg: raises
     # during grouping, before extraction).

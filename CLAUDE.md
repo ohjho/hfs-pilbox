@@ -75,7 +75,10 @@ commit the JSON.
     four `boxer.BBOX_FORMATS` (default `coco_normalized`), a comma-separated `coord_keys`
     textbox (default `"x,y,w,h"`), then `label_key` / `color_key` / `mask_key` (default
     `"mask_b64"`, matching the SAM2 example data) / `mask_alpha` / `width` / `font_size`
-    mirroring the image Annotate tab. Output is a silent annotated video at source
+    mirroring the image Annotate tab, plus an optional `text_overlay` caption (a `gr.Textbox`,
+    default empty = off) with its own `text_font_size` slider and `text_y_position` dropdown
+    (`ffmpret.TEXT_Y_POSITIONS`, default `bottom`) — burned into every frame beneath the
+    annotations. Output is a silent annotated video at source
     resolution/fps. Each distinct `color_key` value keeps one stable color across all frames.
   - **Crop** tab: `crop_image(...)` → `pilbox.crop` (`api_name="crop"`). Inputs are an image
     plus manual `gr.Number` fields `x0/y0/x1/y1` (pascal_voc box); output is the cropped
@@ -193,13 +196,15 @@ video and encoding frames back into one, via `ffmpeg-python`. Depends on `ffmpeg
   Raises (does not return `None`) when there's no video stream, so failures are legible to
   the callers that subscript the result.
 - `extract_frames(input_path, fps=8, max_short_edge=1080, write_timestamp=True,
-  write_frame_num=True, output_dir=None, out_vid_path=None, text_font_size=20,
-  text_y_position="bottom") -> list[PIL.Image]` decodes frames by piping ffmpeg `rawvideo`
+  write_frame_num=True, output_dir=None, out_vid_path=None, text_overlay=None,
+  text_font_size=20, text_y_position="bottom") -> list[PIL.Image]` decodes frames by piping
+  ffmpeg `rawvideo`
   to stdout. Requested `fps` is capped to source fps; **`fps=None` skips resampling and
   extracts every native frame** (so output index i == source frame i — what `vidbox` needs
   for frame-accurate annotation). Frames may be scaled down so the short edge ≤
   `max_short_edge`. An optional `drawtext` overlay stamps timestamp/frame-number
-  (`text_y_position` ∈ {top, middle, bottom}); it uses ffmpeg's default font. A
+  (`text_y_position` ∈ module constant `TEXT_Y_POSITIONS` = {top, middle, bottom}); it uses
+  ffmpeg's default font. A
   `text_overlay` string (default `None`) is prefixed to that overlay line, and is drawn even
   when `write_timestamp=False`, so it works standalone. The overlay text is built by
   `_build_drawtext_text` and passed to drawtext via a temp **`textfile=`** (removed in a
@@ -242,8 +247,12 @@ the three existing modules). Keeps `pilbox` lite by living in its own module.
 
 - `annotate_video(video_path, detections, out_path, *, bbox_format="coco_normalized",
   coord_keys=("x","y","w","h"), frame_key="frame", label_key="track_id",
-  color_key="track_id", mask_key="mask_b64", mask_alpha=0.5, width=3, font_size=20) ->
-  out_path`. `detections` is a **flat** list of per-frame dicts (frame index under
+  color_key="track_id", mask_key="mask_b64", mask_alpha=0.5, width=3, font_size=20,
+  text_overlay=None, text_font_size=20, text_y_position="bottom") ->
+  out_path`. The three `text_*` params pass through to `ffmpret.extract_frames` — an
+  optional caption burned into every frame at extraction time, i.e. beneath the box/mask
+  annotations (`font_size` is the pilbox label font; `text_font_size` the ffmpeg overlay
+  font). `detections` is a **flat** list of per-frame dicts (frame index under
   `frame_key`, box values under `coord_keys` read positionally per `bbox_format`, optional
   `label_key`/`color_key`/`mask_key`). It: probes metadata → extracts **every native frame**
   (`ffmpret.extract_frames(fps=None)`) → groups detections by frame → converts each box via

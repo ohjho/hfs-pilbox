@@ -17,6 +17,9 @@ logger.add(
 )
 app = typer.Typer(pretty_exceptions_show_locals=False)
 
+# Vertical placements accepted by extract_frames' text_y_position.
+TEXT_Y_POSITIONS = ("top", "middle", "bottom")
+
 
 def parse_frame_name(fname: str):
     """return a tuple of frame_type and frame_index
@@ -229,8 +232,8 @@ def extract_frames(
         "bottom": "h-(2*lh)",
     }
     assert (
-        text_y_position in y_position_map
-    ), f"text_y_position must be one of {list(y_position_map)}, got {text_y_position!r}"
+        text_y_position in TEXT_Y_POSITIONS
+    ), f"text_y_position must be one of {list(TEXT_Y_POSITIONS)}, got {text_y_position!r}"
     text_y_expr = y_position_map[text_y_position]
 
     if output_dir:

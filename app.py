@@ -13,6 +13,7 @@ from loguru import logger
 from PIL import ImageColor
 
 import boxer
+import ffmpret
 import pilbox
 import vidbox
 
@@ -261,6 +262,9 @@ def annotate_video(
     mask_alpha,
     width,
     font_size,
+    text_overlay=None,
+    text_font_size=20,
+    text_y_position="bottom",
 ) -> str:
     """Draw per-frame bounding boxes (and optional masks) onto every frame of a video and return the annotated video.
 
@@ -271,7 +275,10 @@ def annotate_video(
     drawn on its frame; each distinct color_key value keeps ONE stable color across the whole video (so
     a track id is one consistent color), and any mask is drawn as a translucent overlay beneath the box
     in that same color. The output is a new silent video at the source resolution and frame rate with
-    all boxes, labels, and masks burned in. The box coordinates are interpreted per bbox_format, one of:
+    all boxes, labels, and masks burned in. An optional text_overlay caption (e.g. a clip name or
+    camera id) can additionally be burned into every frame, horizontally centered at a chosen
+    vertical position and font size, drawn beneath the boxes/masks. The box coordinates are
+    interpreted per bbox_format, one of:
     "pascal_voc" = [x0, y0, x1, y1] absolute pixels; "albumentations" = [x0, y0, x1, y1] normalized 0-1;
     "coco" = [x0, y0, width, height] absolute pixels; "coco_normalized" = [x0, y0, width, height]
     normalized 0-1 — as documented at
@@ -288,6 +295,9 @@ def annotate_video(
         mask_alpha: Mask overlay opacity from 0.0 (invisible) to 1.0 (solid color).
         width: Box outline width in pixels.
         font_size: Label font size in points.
+        text_overlay: Optional literal caption text burned into every frame of the output video; leave empty for no caption.
+        text_font_size: Font size of the text_overlay caption in points (independent of the box-label font_size).
+        text_y_position: Vertical placement of the text_overlay caption: "top", "middle", or "bottom".
     """
     if video_path is None:
         raise gr.Error("Please provide an input video.")
@@ -313,6 +323,9 @@ def annotate_video(
             mask_alpha=float(mask_alpha),
             width=int(width),
             font_size=int(font_size),
+            text_overlay=(text_overlay or "").strip() or None,
+            text_font_size=int(text_font_size),
+            text_y_position=text_y_position,
         )
     except (ValueError, KeyError) as e:
         raise gr.Error(str(e))
@@ -480,6 +493,13 @@ annotate_video_interface = gr.Interface(
         gr.Slider(0, 1, value=0.5, step=0.05, label="Mask opacity"),
         gr.Slider(1, 10, value=3, step=1, label="Box width"),
         gr.Slider(8, 60, value=20, step=1, label="Font size"),
+        gr.Textbox(value=None, label="Text overlay (optional)"),
+        gr.Slider(8, 60, value=20, step=1, label="Text overlay font size"),
+        gr.Dropdown(
+            choices=list(ffmpret.TEXT_Y_POSITIONS),
+            value="bottom",
+            label="Text overlay position",
+        ),
     ],
     outputs=gr.Video(label="Annotated Video"),
     examples=(
@@ -495,6 +515,9 @@ annotate_video_interface = gr.Interface(
                 0.5,
                 3,
                 20,
+                None,
+                20,
+                "bottom",
             ]
         ]
         if EXAMPLE_VIDEO and EXAMPLE_VIDEO_JSON
