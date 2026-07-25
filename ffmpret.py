@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+import tempfile
 from typing import Optional
 
 import ffmpeg
@@ -31,6 +32,74 @@ def parse_frame_name(fname: str):
     fn, fext = os.path.splitext(os.path.basename(fname))
     frame_type, frame_index = fn.rsplit("_", 1)
     return frame_type, int(frame_index)
+
+
+def _drawtext_escape(text: str) -> str:
+    r"""Escape a literal string for ffmpeg's ``drawtext`` text expansion.
+
+    The overlay text is passed to drawtext via ``textfile=`` (see
+    :func:`extract_frames`), so the file content skips filtergraph parsing
+    entirely and only drawtext's *text expansion* applies: ``\`` escapes the
+    next character and a bare ``%`` starts a ``%{...}`` sequence that silently
+    breaks rendering. Everything else (quotes, colons, commas, spaces) is
+    literal.
+
+    Args:
+        text (str): Raw text to render verbatim.
+
+    Returns:
+        str: The escaped text.
+
+    >>> _drawtext_escape("50% off: it's, fine")
+    "50\\% off: it's, fine"
+    >>> _drawtext_escape("a\\b")
+    'a\\\\b'
+    """
+    return text.replace("\\", "\\\\").replace("%", "\\%")
+
+
+def _build_drawtext_text(
+    write_timestamp: bool,
+    write_frame_num: bool,
+    text_overlay: Optional[str] = None,
+) -> str:
+    """Build the ``drawtext`` overlay text (the ``textfile=`` content).
+
+    Parts are joined with `` |`` on a single line: an optional caller-supplied
+    prefix (``text_overlay``, escaped via :func:`_drawtext_escape`), then the
+    timestamp, then the frame number. The frame number is only shown when the
+    timestamp is (matching :func:`extract_frames`'s historical behavior). The
+    string is a drawtext text-expansion template — it must reach drawtext
+    verbatim, which is why :func:`extract_frames` passes it via a temp file
+    (``textfile=``) instead of inline (``text=``, whose filtergraph escaping
+    cannot express every literal string).
+
+    Args:
+        write_timestamp (bool): Include the ``%{pts:hms}`` timestamp part.
+        write_frame_num (bool): Include the ``%{frame_num}`` part (only takes
+            effect when ``write_timestamp`` is True).
+        text_overlay (str | None): Custom literal text prefixed to the line.
+
+    Returns:
+        str: The drawtext text-expansion template.
+
+    >>> _build_drawtext_text(True, True)
+    'Timestamp:%{pts:hms} |Frame Number: %{frame_num}'
+    >>> _build_drawtext_text(True, False)
+    'Timestamp:%{pts:hms}'
+    >>> _build_drawtext_text(False, False, "cam-1")
+    'cam-1'
+    >>> _build_drawtext_text(True, True, "cam-1")
+    'cam-1 |Timestamp:%{pts:hms} |Frame Number: %{frame_num}'
+    """
+    parts = []
+    if text_overlay:
+        parts.append(_drawtext_escape(text_overlay))
+    if write_timestamp:
+        parts.append("Timestamp:%{pts:hms}")
+        if write_frame_num:
+            parts.append("Frame Number: %{frame_num}")
+    return " |".join(parts)
 
 
 @app.command()
@@ -126,6 +195,7 @@ def extract_frames(
     write_frame_num: bool = True,
     output_dir: Optional[str] = None,
     out_vid_path: Optional[str] = None,
+    text_overlay: Optional[str] = None,
     text_font_size: int = 20,
     text_y_position: str = "bottom",
 ):
@@ -143,6 +213,9 @@ def extract_frames(
         write_frame_num (bool): Whether to write the frame number of each frame.
         output_dir (str): Directory to save the extracted frames.
         out_vid_path (str): Path to save the extracted frames as a video.
+        text_overlay (str | None): Custom literal text prefixed to the overlay
+            line (escaped for drawtext). Drawn even when ``write_timestamp`` is
+            False, so it can be used on its own.
         text_font_size (int): Font size of the timestamp/frame-number overlay.
         text_y_position (str): Vertical placement of the overlay. One of
             "top", "middle", or "bottom" (default).
@@ -191,21 +264,23 @@ def extract_frames(
     if add_scale_filter:
         logger.debug(f"\tscaling video to {w}x{h}")
 
-    # Set drawtext filter text
-    drawtext_filter_text = (
-        r"text='Timestamp\:%{pts\:hms} \|Frame Number\: %{frame_num}'"
-        if write_frame_num
-        else r"text='Timestamp\:%{pts\:hms}'"
-    )
-
     # Setup the ffmpeg filter chain (each entry is comma-joined). fps=None skips
-    # resampling entirely so every native frame is emitted.
+    # resampling entirely so every native frame is emitted. The drawtext text
+    # goes through a temp file (textfile=) rather than inline (text=): the file
+    # content skips filtergraph parsing, so arbitrary overlay text (quotes,
+    # colons, %) can't break the chain.
     filters = []
+    drawtext_file = None
     if fps is not None:
         filters.append(f"fps={fps}")
-    if write_timestamp:
+    if write_timestamp or text_overlay:
+        with tempfile.NamedTemporaryFile(
+            "w", suffix=".txt", delete=False, encoding="utf-8"
+        ) as tf:
+            tf.write(_build_drawtext_text(write_timestamp, write_frame_num, text_overlay))
+            drawtext_file = tf.name
         filters.append(
-            f"drawtext={drawtext_filter_text}: x=(w-tw)/2: y={text_y_expr}: fontcolor=white: fontsize={text_font_size}: box=1: boxcolor=0x00000099: boxborderw=5"
+            f"drawtext=textfile={drawtext_file}: x=(w-tw)/2: y={text_y_expr}: fontcolor=white: fontsize={text_font_size}: box=1: boxcolor=0x00000099: boxborderw=5"
         )
     if add_scale_filter:
         filters.append(f"scale='{w}:{h}'")
@@ -215,56 +290,62 @@ def extract_frames(
     # NOTE: stderr is intentionally left to inherit (not piped). If it were
     # piped without being drained, ffmpeg would block once the OS pipe buffer
     # fills, deadlocking against our stdout-only read loop on longer clips.
-    output_kwargs = {"format": "rawvideo", "pix_fmt": "rgb24"}
-    if filter_chain:  # omit an empty -vf (invalid); no filter = passthrough
-        output_kwargs["vf"] = filter_chain
-    process = (
-        ffmpeg.input(input_path)
-        .output("pipe:", **output_kwargs)
-        .run_async(pipe_stdout=True)
-    )
-    logger.info(f"running ffmpeg with filter:\n{filter_chain or '(none)'}")
-
-    frame_size = (
-        long_edge * max_short_edge * 3 if add_scale_filter else org_w * org_h * 3
-    )  # 3 bytes per pixel (RGB)
-    frames = []
-
-    # total_frames (duration * fps) is only an estimate for the progress bar;
-    # read until the pipe is exhausted so we don't drop the tail frame or stop
-    # before EOF when the estimate is slightly off.
-    with tqdm(total=total_frames, desc="Extracting frames with FFMPEG") as pbar:
-        while True:
-            in_bytes = process.stdout.read(frame_size)
-            if not in_bytes or len(in_bytes) < frame_size:
-                break
-            frame = Image.frombytes(
-                "RGB", (w, h) if add_scale_filter else (org_w, org_h), in_bytes
-            )
-            frames.append(frame)
-            pbar.update(1)
-
-    process.stdout.close()
-    process.wait()
-
-    if output_dir:
-        vname, _ = os.path.splitext(os.path.basename(input_path))
-        for i, im in enumerate(tqdm(frames, desc=f"Saving frames to {output_dir}")):
-            output_path = os.path.join(output_dir, f"{vname}_{i}.jpg")
-            im.save(output_path)
-
-    if out_vid_path:
-        vid_kwargs = {
-            "vcodec": "libx264",
-            "pix_fmt": "yuv420p",
-            "r": org_fps if fps is None else fps,
-        }
-        if filter_chain:
-            vid_kwargs["vf"] = filter_chain
-        ffmpeg.input(input_path).output(out_vid_path, **vid_kwargs).run(
-            overwrite_output=True
+    # The try/finally keeps the drawtext textfile alive through both ffmpeg
+    # runs (extraction + optional re-encode) and removes it afterwards.
+    try:
+        output_kwargs = {"format": "rawvideo", "pix_fmt": "rgb24"}
+        if filter_chain:  # omit an empty -vf (invalid); no filter = passthrough
+            output_kwargs["vf"] = filter_chain
+        process = (
+            ffmpeg.input(input_path)
+            .output("pipe:", **output_kwargs)
+            .run_async(pipe_stdout=True)
         )
-        logger.success(f"Video created at {out_vid_path}")
+        logger.info(f"running ffmpeg with filter:\n{filter_chain or '(none)'}")
+
+        frame_size = (
+            long_edge * max_short_edge * 3 if add_scale_filter else org_w * org_h * 3
+        )  # 3 bytes per pixel (RGB)
+        frames = []
+
+        # total_frames (duration * fps) is only an estimate for the progress bar;
+        # read until the pipe is exhausted so we don't drop the tail frame or stop
+        # before EOF when the estimate is slightly off.
+        with tqdm(total=total_frames, desc="Extracting frames with FFMPEG") as pbar:
+            while True:
+                in_bytes = process.stdout.read(frame_size)
+                if not in_bytes or len(in_bytes) < frame_size:
+                    break
+                frame = Image.frombytes(
+                    "RGB", (w, h) if add_scale_filter else (org_w, org_h), in_bytes
+                )
+                frames.append(frame)
+                pbar.update(1)
+
+        process.stdout.close()
+        process.wait()
+
+        if output_dir:
+            vname, _ = os.path.splitext(os.path.basename(input_path))
+            for i, im in enumerate(tqdm(frames, desc=f"Saving frames to {output_dir}")):
+                output_path = os.path.join(output_dir, f"{vname}_{i}.jpg")
+                im.save(output_path)
+
+        if out_vid_path:
+            vid_kwargs = {
+                "vcodec": "libx264",
+                "pix_fmt": "yuv420p",
+                "r": org_fps if fps is None else fps,
+            }
+            if filter_chain:
+                vid_kwargs["vf"] = filter_chain
+            ffmpeg.input(input_path).output(out_vid_path, **vid_kwargs).run(
+                overwrite_output=True
+            )
+            logger.success(f"Video created at {out_vid_path}")
+    finally:
+        if drawtext_file:
+            os.unlink(drawtext_file)
 
     return frames
 

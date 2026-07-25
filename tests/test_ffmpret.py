@@ -59,6 +59,49 @@ def test_get_video_metadata_raises_without_video_stream(monkeypatch):
         ffmpret.get_video_metadata("dummy.mp4", bverbose=False)
 
 
+def test_build_drawtext_text_legacy_template():
+    # with no overlay, the textfile content must render exactly what the old
+    # inline text='...' strings rendered (timestamp / frame-number template).
+    assert (
+        ffmpret._build_drawtext_text(True, True)
+        == "Timestamp:%{pts:hms} |Frame Number: %{frame_num}"
+    )
+    assert ffmpret._build_drawtext_text(True, False) == "Timestamp:%{pts:hms}"
+
+
+def test_build_drawtext_text_overlay_is_prefix():
+    assert ffmpret._build_drawtext_text(False, False, "cam-1") == "cam-1"
+    assert (
+        ffmpret._build_drawtext_text(True, True, "cam-1")
+        == "cam-1 |Timestamp:%{pts:hms} |Frame Number: %{frame_num}"
+    )
+    # frame number stays gated on write_timestamp
+    assert ffmpret._build_drawtext_text(False, True, "cam-1") == "cam-1"
+
+
+def test_drawtext_escape_special_chars():
+    # textfile content only goes through drawtext's text expansion: \ escapes
+    # the next char and a bare % starts a %{...} sequence; all else is literal.
+    assert ffmpret._drawtext_escape("50% off") == "50\\% off"
+    assert ffmpret._drawtext_escape("a\\b") == "a\\\\b"
+    assert ffmpret._drawtext_escape("it's: fine, ok") == "it's: fine, ok"
+    assert ffmpret._drawtext_escape("plain text") == "plain text"
+
+
+def test_extract_frames_text_overlay(tiny_video):
+    # overlay with every awkward char; must not blow up the filter chain and
+    # must render (frames come back at source size, drawtext needs a font so
+    # this also exercises the textfile= path end-to-end).
+    frames = ffmpret.extract_frames(
+        tiny_video,
+        fps=5,
+        write_timestamp=False,
+        text_overlay="it's: 100% a\\b, ok",
+    )
+    assert 4 <= len(frames) <= 6
+    assert all(f.size == (64, 48) for f in frames)
+
+
 @pytest.fixture
 def tiny_video(tmp_path):
     """Generate a 1s, 10fps, 64x48 test clip via ffmpeg (skips if no binary)."""

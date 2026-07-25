@@ -199,7 +199,13 @@ video and encoding frames back into one, via `ffmpeg-python`. Depends on `ffmpeg
   extracts every native frame** (so output index i == source frame i — what `vidbox` needs
   for frame-accurate annotation). Frames may be scaled down so the short edge ≤
   `max_short_edge`. An optional `drawtext` overlay stamps timestamp/frame-number
-  (`text_y_position` ∈ {top, middle, bottom}); it uses ffmpeg's default font. Saves to
+  (`text_y_position` ∈ {top, middle, bottom}); it uses ffmpeg's default font. A
+  `text_overlay` string (default `None`) is prefixed to that overlay line, and is drawn even
+  when `write_timestamp=False`, so it works standalone. The overlay text is built by
+  `_build_drawtext_text` and passed to drawtext via a temp **`textfile=`** (removed in a
+  `finally`), not inline `text=` — file content skips filtergraph parsing, so arbitrary
+  text (quotes, colons, `%`) can't break the chain; only drawtext's *text expansion* level
+  remains, escaped by `_drawtext_escape` (`\` and `%`). Saves to
   `{output_dir}/{vname}_{i}.jpg` and/or re-encodes to `out_vid_path` when given.
   **stderr is intentionally left to inherit (not piped)** while only stdout is read — piping
   an undrained stderr deadlocks ffmpeg on longer clips. The read loop runs until the pipe is
