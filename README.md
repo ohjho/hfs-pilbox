@@ -32,3 +32,8 @@ setup your `HF_TOKEN` in your [Github secret](https://docs.github.com/en/actions
 * [Gradio Course](https://huggingface.co/learn/llm-course/chapter9/2?fw=pt)
 * [Gradio Doc](https://www.gradio.app/guides/quickstart)
 * Check out the configuration reference at https://huggingface.co/docs/hub/spaces-config-reference
+
+## Concurrency
+Each tab handles several requests at once: image tabs up to 8, video tabs up to 2 (they spawn
+ffmpeg and hold whole clips in RAM). Tune via environment variables (or HF Space variables):
+`PILBOX_IMAGE_CONCURRENCY`, `PILBOX_VIDEO_CONCURRENCY`, `PILBOX_QUEUE_MAX_SIZE` (waiting-queue cap, default 64).

@@ -5,6 +5,7 @@ Web-UI counterpart of ``annotate_cli.py`` — paste a list of objects (each with
 """
 
 import json
+import os
 import tempfile
 from pathlib import Path
 
@@ -18,6 +19,14 @@ import pilbox
 import vidbox
 
 ASSETS = Path(__file__).parent / "assets"
+
+# Per-endpoint concurrency (Gradio's default is 1 request at a time per endpoint). The image
+# tabs are cheap Pillow/numpy calls; the video tabs each spawn ffmpeg and hold every decoded
+# frame in RAM, so they stay low on shared CPU hardware (HF free tier: 2 vCPU / 16 GB).
+# Override via env vars (HF Space variables) to scale up on bigger hardware.
+IMAGE_CONCURRENCY = int(os.environ.get("PILBOX_IMAGE_CONCURRENCY", "8"))
+VIDEO_CONCURRENCY = int(os.environ.get("PILBOX_VIDEO_CONCURRENCY", "2"))
+QUEUE_MAX_SIZE = int(os.environ.get("PILBOX_QUEUE_MAX_SIZE", "64"))
 
 
 def _load_example():
@@ -474,6 +483,7 @@ annotate_interface = gr.Interface(
     title="PILBox — Bounding Box Annotator",
     description="Draw bounding boxes on an image (pascal_voc / albumentations / coco / coco_normalized) using numpy + Pillow.",
     api_name="annotate",
+    concurrency_limit=IMAGE_CONCURRENCY,
 )
 
 annotate_video_interface = gr.Interface(
@@ -526,6 +536,7 @@ annotate_video_interface = gr.Interface(
     title="PILBox — Video Annotator",
     description="Draw per-frame bounding boxes and masks over a video (pascal_voc / albumentations / coco / coco_normalized).",
     api_name="annotate_video",
+    concurrency_limit=VIDEO_CONCURRENCY,
 )
 
 crop_interface = gr.Interface(
@@ -542,6 +553,7 @@ crop_interface = gr.Interface(
     title="PILBox — Image Cropper",
     description="Crop an image to a pascal_voc box (x0, y0, x1, y1) using numpy + Pillow.",
     api_name="crop",
+    concurrency_limit=IMAGE_CONCURRENCY,
 )
 
 crop_video_interface = gr.Interface(
@@ -584,6 +596,7 @@ crop_video_interface = gr.Interface(
     title="PILBox — Video Cropper",
     description="Crop a video to a moving subject via a per-frame box JSON (tracking window; masks ignored).",
     api_name="crop_video",
+    concurrency_limit=VIDEO_CONCURRENCY,
 )
 
 mask_interface = gr.Interface(
@@ -602,6 +615,7 @@ mask_interface = gr.Interface(
     title="PILBox — Background Masker",
     description="Cut out an image's foreground with a base64 PNG mask, over a solid background color.",
     api_name="mask",
+    concurrency_limit=IMAGE_CONCURRENCY,
 )
 
 mask_video_interface = gr.Interface(
@@ -626,6 +640,7 @@ mask_video_interface = gr.Interface(
     title="PILBox — Video Masker",
     description="Keep each frame's masked foreground over a solid background color, from a per-frame mask JSON (boxes ignored).",
     api_name="mask_video",
+    concurrency_limit=VIDEO_CONCURRENCY,
 )
 
 app = gr.TabbedInterface(
@@ -642,6 +657,10 @@ app = gr.TabbedInterface(
 )
 
 if __name__ == "__main__":
+    # default_concurrency_limit covers events without an explicit limit (e.g. example loads);
+    # max_size bounds the waiting queue. launch()'s max_threads default (40) exceeds the
+    # 3*IMAGE + 3*VIDEO = 30 concurrent calls, so the worker pool is not the bottleneck.
+    app.queue(default_concurrency_limit=IMAGE_CONCURRENCY, max_size=QUEUE_MAX_SIZE)
     app.launch(
         mcp_server=True, app_kwargs={"docs_url": "/docs"}  # FastAPI Swagger API Docs
     )

@@ -100,6 +100,15 @@ commit the JSON.
     (`vidbox.MASK_GAP_BEHAVIORS` = `skip`/`fill`, default `skip`). Output is a video with each
     frame's masked foreground kept over the background color; **boxes in the JSON are ignored**,
     one mask per frame. Color conversion via `_rgb_from_css`, as the image Mask tab.
+- **Concurrency is tiered per tab.** Gradio defaults every endpoint to one request at a time;
+  `app.py` sets `concurrency_limit=IMAGE_CONCURRENCY` (default 8) on the three image interfaces
+  and `concurrency_limit=VIDEO_CONCURRENCY` (default 2) on the three video ones, since each video
+  call spawns ffmpeg and holds every decoded frame in RAM (sized for HF free CPU basic, 2 vCPU /
+  16 GB). `__main__` calls `app.queue(default_concurrency_limit=IMAGE_CONCURRENCY,
+  max_size=QUEUE_MAX_SIZE)` (default 64) before `launch`. All three are env-var overridable
+  (`PILBOX_IMAGE_CONCURRENCY`, `PILBOX_VIDEO_CONCURRENCY`, `PILBOX_QUEUE_MAX_SIZE`, e.g. as HF
+  Space variables) to scale on bigger hardware; `launch`'s `max_threads` default (40) already
+  exceeds 3×8 + 3×2 = 30. `tests/test_app.py` checks the wiring and the env override.
 - Demo examples are loaded from `assets/` at import, each guarded so a missing asset doesn't
   crash startup: `_load_example()` (image + JSON), `_example_mask()` (first object's
   `b64_mask` for the Mask tab), `_load_video_example()` (the SAM2 video + `*-with_mask.json`
